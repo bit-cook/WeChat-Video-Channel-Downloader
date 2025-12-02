@@ -1,24 +1,20 @@
 package cmd
 
 import (
-	"bytes"
 	"context"
 	"fmt"
-	"log"
-	"net"
-	"net/http"
 	"os"
 	"os/signal"
-	"strconv"
 	"syscall"
-	"time"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 
 	"wx_channel/config"
-	"wx_channel/internal/handler"
+	"wx_channel/internal/download"
+	"wx_channel/internal/interceptor"
+	"wx_channel/internal/manager"
 )
 
 var (
@@ -27,8 +23,8 @@ var (
 	hostname       string
 	port           int
 	debug          bool
-	cert_files     *handler.ServerCertFiles
-	channel_files  *handler.ChannelInjectedFiles
+	cert_files     *interceptor.ServerCertFiles
+	channel_files  *interceptor.ChannelInjectedFiles
 	cert_file_name string
 	cfg            *config.Config
 )
@@ -40,14 +36,15 @@ var root_cmd = &cobra.Command{
 	PreRun: func(cmd *cobra.Command, args []string) {
 	},
 	Run: func(cmd *cobra.Command, args []string) {
+		cfg.Debug = viper.GetBool("debug")
 		root_command(RootCommandArg{
-			HandlerClientPayload: handler.HandlerClientPayload{
+			InterceptorConfig: interceptor.InterceptorConfig{
 				Version:        Version,
 				SetSystemProxy: viper.GetBool("proxy.system"),
 				Device:         device,
 				Hostname:       viper.GetString("proxy.hostname"),
 				Port:           viper.GetInt("proxy.port"),
-				Debug:          viper.GetBool("debug"),
+				Debug:          cfg.Debug,
 				CertFiles:      cert_files,
 				CertFileName:   cert_file_name,
 				ChannelFiles:   channel_files,
@@ -68,13 +65,13 @@ func init() {
 	viper.BindPFlag("debug", root_cmd.PersistentFlags().Lookup("debug"))
 }
 
-func Execute(app_ver string, cert_filename string, channel_files *handler.ChannelInjectedFiles, cert_files *handler.ServerCertFiles, c *config.Config) error {
+func Execute(app_ver string, cert_filename string, files1 *interceptor.ChannelInjectedFiles, files2 *interceptor.ServerCertFiles, c *config.Config) error {
 	cobra.MousetrapHelpText = ""
 
 	Version = app_ver
 	cert_file_name = cert_filename
-	cert_files = cert_files
-	channel_files = channel_files
+	channel_files = files1
+	cert_files = files2
 	cfg = c
 
 	return root_cmd.Execute()
@@ -84,7 +81,7 @@ func Register(cmd *cobra.Command) {
 }
 
 type RootCommandArg struct {
-	handler.HandlerClientPayload
+	interceptor.InterceptorConfig
 }
 
 func root_command(args RootCommandArg) {
@@ -99,69 +96,62 @@ func root_command(args RootCommandArg) {
 
 	fmt.Printf("\nv%v\n", Version)
 	fmt.Printf("问题反馈 https://github.com/ltaoo/wx_channels_download/issues\n\n")
+	if cf := viper.ConfigFileUsed(); cf != "" {
+		fmt.Printf("配置文件 %s\n", cf)
+	}
 
-	client, err := handler.NewHandlerClient(args.HandlerClientPayload)
+	mgr := manager.NewServerManager()
+
+	// 初始化拦截服务
+	interceptorServer, err := interceptor.NewInterceptorServer(args.InterceptorConfig)
 	if err != nil {
-		fmt.Printf("ERROR 初始化客户端失败: %v\n", err.Error())
+		fmt.Printf("ERROR 初始化代理服务失败: %v\n", err.Error())
 		os.Exit(1)
 	}
-	if err := client.Start(); err != nil {
-		fmt.Printf("ERROR 启动客户端失败: %v\n", err.Error())
-		os.Exit(1)
-	}
-	proxy_server_addr := "127.0.0.1:" + strconv.Itoa(args.Port)
+	mgr.RegisterServer(interceptorServer)
 
-	var buf bytes.Buffer
-	// 为了不在终端输出 http server 的日志
-	log.SetOutput(&buf)
-	server := &http.Server{
-		Addr: proxy_server_addr,
-		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			client.ServeHTTP(w, r)
-		}),
-		ReadTimeout:  15 * time.Second,
-		WriteTimeout: 15 * time.Second,
-		IdleTimeout:  60 * time.Second,
-	}
+	// 初始化下载服务
+	downloadServer := download.NewDownloadServer(cfg.DownloadLocalServerAddr)
+	mgr.RegisterServer(downloadServer)
+
 	cleanup := func() {
-		fmt.Printf("\n正在关闭下载服务...\n")
-		if err := client.Stop(); err != nil {
-			fmt.Printf("⚠️ 关闭客户端失败: %v\n", err)
+		fmt.Printf("\n正在关闭服务...\n")
+		if err := mgr.StopServer("interceptor"); err != nil {
+			fmt.Printf("⚠️ 关闭代理服务失败: %v\n", err)
 		}
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer shutdownCancel()
-		if err := server.Shutdown(shutdownCtx); err != nil {
-			fmt.Printf("⚠️ 代理服务器关闭失败: %v\n", err)
-			server.Close()
+		if err := mgr.StopServer("download"); err != nil {
+			fmt.Printf("⚠️ 关闭下载服务失败: %v\n", err)
 		}
 	}
 
-	listener, err := net.Listen("tcp", server.Addr)
-	if err != nil {
-		fmt.Printf("ERROR 服务器启动失败: %v\n", err.Error())
+	if args.Cfg.DownloadLocalServerEnabled {
+		// 启动下载服务
+		if err := mgr.StartServer("download"); err != nil {
+			fmt.Printf("ERROR 启动下载服务失败: %v\n", err.Error())
+			cleanup()
+			os.Exit(1)
+		}
+		color.Green("下载服务启动成功")
+	}
+	// 启动代理服务
+	if err := mgr.StartServer("interceptor"); err != nil {
+		fmt.Printf("ERROR 启动代理服务失败: %v\n", err.Error())
 		cleanup()
 		os.Exit(1)
 	}
+	color.Green("代理服务启动成功")
 
-	color.Green("下载服务启动成功")
 	if !args.SetSystemProxy {
-		color.Red(fmt.Sprintf("当前未设置系统代理,请通过软件将流量转发至 %v", proxy_server_addr))
+		color.Red(fmt.Sprintf("当前未设置系统代理,请通过软件将流量转发至 %v", interceptorServer.Addr()))
 		color.Red("设置成功后再打开视频号页面下载")
 	} else {
-		color.Green(fmt.Sprintf("已修改系统代理为 %v", proxy_server_addr))
+		color.Green(fmt.Sprintf("已修改系统代理为 %v", interceptorServer.Addr()))
 		color.Green("请打开需要下载的视频号页面进行下载")
 	}
 	fmt.Println("\n按 Ctrl+C 退出...")
 
-	go func() {
-		if err := server.Serve(listener); err != nil && err != http.ErrServerClosed {
-			err_chan <- fmt.Errorf("服务器运行错误: %w", err)
-		}
-	}()
-
 	select {
 	case _ = <-signal_chan:
-		// fmt.Printf("\n收到信号: %v\n", sig)
 		cleanup()
 	case err := <-err_chan:
 		fmt.Printf("ERROR %v\n", err.Error())

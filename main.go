@@ -6,7 +6,7 @@ import (
 
 	"wx_channel/cmd"
 	"wx_channel/config"
-	"wx_channel/internal/handler"
+	"wx_channel/internal/interceptor"
 	"wx_channel/pkg/platform"
 )
 
@@ -16,11 +16,14 @@ var cert_file []byte
 //go:embed certs/private.key
 var private_key_file []byte
 
-//go:embed lib/FileSaver.min.js
+//go:embed inject/lib/FileSaver.min.js
 var js_file_saver []byte
 
-//go:embed lib/jszip.min.js
+//go:embed inject/lib/jszip.min.js
 var js_zip []byte
+
+//go:embed inject/lib/recorder.min.js
+var js_recorder []byte
 
 //go:embed inject/pagespy.min.js
 var js_pagespy []byte
@@ -40,24 +43,26 @@ var js_main []byte
 //go:embed inject/live.js
 var js_live_main []byte
 
+var FilesCert = &interceptor.ServerCertFiles{
+	CertFile:       cert_file,
+	PrivateKeyFile: private_key_file,
+}
+var FilesChannelScript = &interceptor.ChannelInjectedFiles{
+	JSFileSaver: js_file_saver,
+	JSZip:       js_zip,
+	JSRecorder:  js_recorder,
+	JSPageSpy:   js_pagespy,
+	JSDebug:     js_debug,
+	JSError:     js_error,
+	JSUtils:     js_utils,
+	JSMain:      js_main,
+	JSLiveMain:  js_live_main,
+}
+
 var RootCertificateName = "SunnyNet"
-var AppVer = "251122"
+var AppVer = "251202"
 
 func main() {
-	files := &handler.ServerCertFiles{
-		CertFile:       cert_file,
-		PrivateKeyFile: private_key_file,
-	}
-	channel_files := &handler.ChannelInjectedFiles{
-		JSFileSaver: js_file_saver,
-		JSZip:       js_zip,
-		JSPageSpy:   js_pagespy,
-		JSDebug:     js_debug,
-		JSError:     js_error,
-		JSUtils:     js_utils,
-		JSMain:      js_main,
-		JSLiveMain:  js_live_main,
-	}
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		fmt.Printf("加载配置文件失败 %v", err.Error())
@@ -70,9 +75,7 @@ func main() {
 		}
 		return
 	}
-	if err := cmd.Execute(AppVer, RootCertificateName, channel_files, files, cfg); err != nil {
-		fmt.Printf("初始化失败 %v", err.Error())
-		fmt.Printf("按 Ctrl+C 退出...\n")
-		select {}
+	if err := cmd.Execute(AppVer, RootCertificateName, FilesChannelScript, FilesCert, cfg); err != nil {
+		fmt.Printf("初始化失败 %v\n", err.Error())
 	}
 }

@@ -1,10 +1,14 @@
-package handler
+package interceptor
 
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/ltaoo/echo/plugin"
 
@@ -12,7 +16,6 @@ import (
 	"wx_channel/pkg/util"
 )
 
-// 预编译的正则表达式，避免每次请求时重复编译导致内存泄露
 var (
 	// HTML处理相关正则
 	scriptSrcReg  = regexp.MustCompile(`src="([^"]{1,})\.js"`)
@@ -25,23 +28,24 @@ var (
 	jsImportReg     = regexp.MustCompile(`import {0,1}"([^"]{1,})\.js"`)
 
 	// 特定路径的正则
-	jsSourceBufferReg  = regexp.MustCompile(`this.sourceBuffer.appendBuffer\(h\),`)
+	jsSourceBufferReg  = regexp.MustCompile(`this.sourceBuffer.appendBuffer\(([a-zA-Z]{1,})\),`)
 	jsAutoCutReg       = regexp.MustCompile(`if\(f.cmd===re.MAIN_THREAD_CMD.AUTO_CUT`)
 	jsCommentDetailReg = regexp.MustCompile(`async finderGetCommentDetail\((\w+)\)\{(.*?)\}async`)
 	jsDialogReg        = regexp.MustCompile(`i.default={dialog`)
 	jsLiveInfoReg      = regexp.MustCompile(`async finderGetLiveInfo\((\w+)\)\{(.*?)\}async`)
-	jsGoToNextFlowReg  = regexp.MustCompile(`goToNextFlowFeed:rs`)
+	jsGoToPrevFlowReg  = regexp.MustCompile(`goToPrevFlowFeed:([a-zA-Z]{1,})`)
+	jsGoToNextFlowReg  = regexp.MustCompile(`goToNextFlowFeed:([a-zA-Z]{1,})`)
 	jsComplaintReg     = regexp.MustCompile(`,"投诉"\)]`)
 	jsFmp4IndexReg     = regexp.MustCompile(`fmp4Index:p.fmp4Index`)
 )
 
-func HandleHttpRequestEcho(version string, files *ChannelInjectedFiles, cfg *config.Config) *plugin.Plugin {
+func CreateChannelInterceptorPlugin(version string, files *ChannelInjectedFiles, cfg *config.Config) *plugin.Plugin {
 	v := "?t=" + version
 	return &plugin.Plugin{
 		Match: "qq.com",
 		OnRequest: func(ctx *plugin.Context) {
 			pathname := ctx.Req.URL.Path
-			if util.Includes(pathname, "jszip") {
+			if util.Includes(pathname, "jszip.min") {
 				ctx.Mock(200, map[string]string{
 					"Content-Type": "application/javascript",
 					"__debug":      "local_file",
@@ -52,6 +56,12 @@ func HandleHttpRequestEcho(version string, files *ChannelInjectedFiles, cfg *con
 					"Content-Type": "application/javascript",
 					"__debug":      "local_file",
 				}, files.JSFileSaver)
+			}
+			if util.Includes(pathname, "recorder.min") {
+				ctx.Mock(200, map[string]string{
+					"Content-Type": "application/javascript",
+					"__debug":      "local_file",
+				}, files.JSRecorder)
 			}
 			if pathname == "/__wx_channels_api/profile" {
 				var data ChannelMediaProfile
@@ -91,9 +101,42 @@ func HandleHttpRequestEcho(version string, files *ChannelInjectedFiles, cfg *con
 		},
 		OnResponse: func(ctx *plugin.Context) {
 			resp_content_type := strings.ToLower(ctx.GetResponseHeader("Content-Type"))
-			hostname := ctx.Res.Request.URL.Hostname()
-			path := ctx.Res.Request.URL.Path
-			if resp_content_type == "text/html; charset=utf-8" {
+			hostname := ctx.Req.URL.Hostname()
+			pathname := ctx.Req.URL.Path
+			if cfg.ChannelDisableLocationToHome && pathname == "/web/pages/feed" && ctx.Res.StatusCode == 302 {
+				u := &url.URL{Scheme: "https", Host: ctx.Req.URL.Hostname(), Path: pathname, RawQuery: ctx.Req.URL.RawQuery}
+				q := u.Query()
+				q.Set("flow", "2")
+				q.Set("fpid", "FinderLike")
+				u.RawQuery = q.Encode()
+				req, err := http.NewRequest(http.MethodGet, u.String(), nil)
+				if err == nil {
+					for k, v := range ctx.Req.Header {
+						for _, vv := range v {
+							req.Header.Add(k, vv)
+						}
+					}
+					req.Header.Del("Accept-Encoding")
+					client := &http.Client{Transport: &http.Transport{Proxy: nil}, Timeout: 10 * time.Second}
+					if resp2, err2 := client.Do(req); err2 == nil {
+						defer resp2.Body.Close()
+						body2, _ := io.ReadAll(resp2.Body)
+						ct := resp2.Header.Get("Content-Type")
+						lct := strings.ToLower(ct)
+						if ct == "" || strings.Contains(lct, "text/html") {
+							ct = "text/html; charset=utf-8"
+						}
+						ctx.Res.StatusCode = 200
+						ctx.Res.Header.Del("Content-Encoding")
+						ctx.Res.Header.Del("Content-Length")
+						ctx.SetResponseHeader("Content-Type", ct)
+						ctx.SetResponseHeader("__debug", "second_fetch")
+						ctx.SetResponseBody(string(body2))
+						resp_content_type = strings.ToLower(ct)
+					}
+				}
+			}
+			if strings.Contains(resp_content_type, "text/html") {
 				// fmt.Println(hostname, path)
 				if hostname == "channels.weixin.qq.com" {
 					resp_body, err := ctx.GetResponseBody()
@@ -105,8 +148,8 @@ func HandleHttpRequestEcho(version string, files *ChannelInjectedFiles, cfg *con
 					html = scriptSrcReg.ReplaceAllString(html, `src="$1.js`+v+`"`)
 					html = scriptHrefReg.ReplaceAllString(html, `href="$1.js`+v+`"`)
 					inserted_scripts := fmt.Sprintf(`<script>%s</script>`, files.JSUtils)
-					if cfg.GlobalUserScript != "" {
-						inserted_scripts += fmt.Sprintf(`<script>%s</script>`, cfg.GlobalUserScript)
+					if cfg.InjectGlobalScript != "" {
+						inserted_scripts += fmt.Sprintf(`<script>%s</script>`, cfg.InjectGlobalScript)
 					}
 					cfg_byte, _ := json.Marshal(cfg)
 					script_config := fmt.Sprintf(`<script>var __wx_channels_config__ = %s;</script>`, string(cfg_byte))
@@ -120,7 +163,7 @@ func HandleHttpRequestEcho(version string, files *ChannelInjectedFiles, cfg *con
 						script_pagespy2 := fmt.Sprintf(`<script>%s</script>`, files.JSDebug)
 						inserted_scripts += script_pagespy + script_pagespy2
 					}
-					if path == "/web/pages/feed" || path == "/web/pages/home" {
+					if pathname == "/web/pages/feed" || pathname == "/web/pages/home" {
 						/** 下载逻辑 */
 						script_main := fmt.Sprintf(`<script>%s</script>`, files.JSMain)
 						if cfg.InjectExtraScriptAfterJSMain != "" {
@@ -128,14 +171,14 @@ func HandleHttpRequestEcho(version string, files *ChannelInjectedFiles, cfg *con
 						}
 						inserted_scripts += script_main
 						html = strings.Replace(html, "<head>", "<head>\n"+inserted_scripts, 1)
-						if path == "/web/pages/home" {
+						if pathname == "/web/pages/home" {
 							fmt.Println("1. 视频号首页 html 注入 js 成功")
 						}
-						if path == "/web/pages/feed" {
+						if pathname == "/web/pages/feed" {
 							fmt.Println("1. 视频详情页 html 注入 js 成功")
 						}
 					}
-					if path == "/web/pages/live" {
+					if pathname == "/web/pages/live" {
 						script_live_main := fmt.Sprintf(`<script>%s</script>`, files.JSLiveMain)
 						inserted_scripts += script_live_main
 						html = strings.Replace(html, "<head>", "<head>\n"+inserted_scripts, 1)
@@ -145,8 +188,8 @@ func HandleHttpRequestEcho(version string, files *ChannelInjectedFiles, cfg *con
 					return
 				}
 			}
-			if resp_content_type == "application/javascript" {
-				if util.Includes(path, "wasm_video_decode") {
+			if strings.Contains(resp_content_type, "application/javascript") {
+				if util.Includes(pathname, "wasm_video_decode") {
 					return
 				}
 				resp_body, err := ctx.GetResponseBody()
@@ -161,12 +204,12 @@ func HandleHttpRequestEcho(version string, files *ChannelInjectedFiles, cfg *con
 				js_script = jsLazyImportReg.ReplaceAllString(js_script, `import("$1.js`+v+`")`)
 				js_script = jsImportReg.ReplaceAllString(js_script, `import"$1.js`+v+`"`)
 
-				if util.Includes(path, "/t/wx_fed/finder/web/web-finder/res/js/index.publish") {
+				if util.Includes(pathname, "/t/wx_fed/finder/web/web-finder/res/js/index.publish") {
 					replace_str1 := `(() => {
 									if (window.__wx_channels_store__) {
-									window.__wx_channels_store__.buffers.push(h);
+									window.__wx_channels_store__.buffers.push($1);
 									}
-									})(),this.sourceBuffer.appendBuffer(h),`
+									})(),this.sourceBuffer.appendBuffer($1),`
 					if jsSourceBufferReg.MatchString(js_script) {
 						fmt.Println("2. 视频播放 js 修改成功")
 					}
@@ -182,7 +225,7 @@ func HandleHttpRequestEcho(version string, files *ChannelInjectedFiles, cfg *con
 					ctx.SetResponseBody(js_script)
 					return
 				}
-				update_media_profile_text := `var profile = media.mediaType !== 4 ? {
+				media_profile_js := `var profile = media.mediaType !== 4 ? {
 									type: "picture",
 									id: data_object.id,
 									title: data_object.objectDesc.description,
@@ -219,6 +262,9 @@ func HandleHttpRequestEcho(version string, files *ChannelInjectedFiles, cfg *con
 									}
 									__wx_channels_store__.profile = profile;
 									window.__wx_channels_store__.profiles.push(profile);
+									setTimeout(() => {
+										window.__wx_channels_cur_video = document.querySelector(".feed-video.video-js");
+									},800);
 									fetch("/__wx_channels_api/profile", {
 										method: "POST",
 										headers: {
@@ -227,7 +273,7 @@ func HandleHttpRequestEcho(version string, files *ChannelInjectedFiles, cfg *con
 										body: JSON.stringify(profile)
 									});
 								})();`
-				if util.Includes(path, "/t/wx_fed/finder/web/web-finder/res/js/virtual_svg-icons-register") {
+				if util.Includes(pathname, "/t/wx_fed/finder/web/web-finder/res/js/virtual_svg-icons-register") {
 					replace_str1 := fmt.Sprintf(`async finderGetCommentDetail($1) {
 					var feedResult = await (async () => {
 						$2;
@@ -239,7 +285,7 @@ func HandleHttpRequestEcho(version string, files *ChannelInjectedFiles, cfg *con
 					var media = data_object.objectDesc.media[0];
 					%v
 					return feedResult;
-				}async`, update_media_profile_text)
+				}async`, media_profile_js)
 					if jsCommentDetailReg.MatchString(js_script) {
 						fmt.Println("3.视频读取 js 修改成功")
 					}
@@ -273,37 +319,72 @@ func HandleHttpRequestEcho(version string, files *ChannelInjectedFiles, cfg *con
 					ctx.SetResponseBody(js_script)
 					return
 				}
-				if util.Includes(path, "vuexStores.publish") {
+				if util.Includes(pathname, "connect.publish") {
 					replace_str1 := fmt.Sprintf(`goToNextFlowFeed:async function(v){
-									await rs(v);
+									await $1(v);
 									setTimeout(() => {
-									var data_object = Zt.value.feed;
+									var data_object = Dt.value.feeds[Dt.value.currentFeedIndex];
+									console.log("handle goto next feed", Dt, data_object);
 									var media = data_object.objectDesc.media[0];
+									window.__wx_channels_cur_video = document.querySelector(".feed-video.video-js");
 									%v
 									if (window.__insert_download_btn_to_home_page) {
 				__insert_download_btn_to_home_page();
 									}
 									}, 0);
-									}`, update_media_profile_text)
+									}`, media_profile_js)
 					js_script = jsGoToNextFlowReg.ReplaceAllString(js_script, replace_str1)
+					replace_str2 := fmt.Sprintf(`goToPrevFlowFeed:async function(v){
+									await $1(v);
+									setTimeout(() => {
+									var data_object = Dt.value.feeds[Dt.value.currentFeedIndex];
+									console.log("handle goto prev feed", Dt, data_object);
+									var media = data_object.objectDesc.media[0];
+									window.__wx_channels_cur_video = document.querySelector(".feed-video.video-js");
+									%v
+									if (window.__insert_download_btn_to_home_page) {
+				__insert_download_btn_to_home_page();
+									}
+									}, 0);
+									}`, media_profile_js)
+					js_script = jsGoToPrevFlowReg.ReplaceAllString(js_script, replace_str2)
 					ctx.SetResponseBody(js_script)
 					return
 				}
-				if util.Includes(path, "/t/wx_fed/finder/web/web-finder/res/js/FeedDetail.publish") {
-					replace_str := `,"投诉"),...(() => {
+				if util.Includes(pathname, "/t/wx_fed/finder/web/web-finder/res/js/FeedDetail.publish") {
+					buttons := []struct {
+						label   string
+						handler string
+					}{
+						{"原始视频", "__wx_channels_handle_click_download__"},
+						{"当前视频", "__wx_channels_download_cur__"},
+						{"下载为mp3", "() => __wx_channels_handle_click_download__(null, true)"},
+						{"打印下载命令", "__wx_channels_handle_print_download_command"},
+						{"下载封面", "__wx_channels_handle_download_cover"},
+						{"复制页面链接", "__wx_channels_handle_copy__"},
+					}
+					var buttonElements []string
+					for _, btn := range buttons {
+						buttonElements = append(buttonElements, fmt.Sprintf(
+							`f("div",{class:"context-item",role:"button",onClick:%s},"%s")`,
+							btn.handler, btn.label,
+						))
+					}
+					button_html := strings.Join(buttonElements, ",")
+					replace_str := fmt.Sprintf(`,"投诉"),...(() => {
 						if (window.__wx_channels_store__ && window.__wx_channels_store__.profile) {
 							return window.__wx_channels_store__.profile.spec.map((sp) => {
 								return f("div",{class:"context-item",role:"button",onClick:() => __wx_channels_handle_click_download__(sp)},sp.fileFormat);
 							});
 						}
 					return [];
-					})(),f("div",{class:"context-item",role:"button",onClick:()=>__wx_channels_handle_click_download__()},"原始视频"),f("div",{class:"context-item",role:"button",onClick:__wx_channels_download_cur__},"当前视频"),f("div",{class:"context-item",role:"button",onClick:__wx_channels_handle_print_download_command},"打印下载命令"),f("div",{class:"context-item",role:"button",onClick:()=>__wx_channels_handle_download_cover()},"下载封面"),f("div",{class:"context-item",role:"button",onClick:__wx_channels_handle_copy__},"复制页面链接")]`
+					})(),%s]`, button_html)
 
 					js_script = jsComplaintReg.ReplaceAllString(js_script, replace_str)
 					ctx.SetResponseBody(js_script)
 					return
 				}
-				if util.Includes(path, "worker_release") {
+				if util.Includes(pathname, "worker_release") {
 					replace_str := `decryptor_array:p.decryptor_array,fmp4Index:p.fmp4Index`
 					js_script = jsFmp4IndexReg.ReplaceAllString(js_script, replace_str)
 					ctx.SetResponseBody(js_script)
