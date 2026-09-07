@@ -64,11 +64,30 @@
   }
 
   function prepare_download_task(params) {
+    // DownloaderModel.prepare passes the batch request body directly. Keep
+    // accepting the older { mode, body } descriptor as well because injected
+    // clients may still call the request core through `requests.download`.
+    const request_body =
+      params && params.body && typeof params.body === "object"
+        ? params.body
+        : params;
+    const objects =
+      request_body && Array.isArray(request_body.objects)
+        ? request_body.objects
+        : [];
+    const object = objects[0] || {};
+    const is_url_task =
+      params && params.mode
+        ? params.mode === "url"
+        : !!object.url &&
+          !object.platform &&
+          !object.content &&
+          !object.platform_id;
     const path =
-      params.mode === "url"
+      is_url_task
         ? "/api/v1/download_task/prepare_by_url"
         : "/api/v1/download_task/prepare";
-    return request.post(path, params.body);
+    return request.post(path, request_body);
   }
 
   function start_all_download_tasks(params) {
@@ -1191,6 +1210,10 @@
         prepare: new RequestCore(prepare_download_task, {
           client: http_client,
         }),
+        update_resource: new RequestCore(
+          (body) => request.post("/api/v1/download_task/update_resource", body),
+          { client: http_client },
+        ),
         start_all: new RequestCore(start_all_download_tasks, {
           client: http_client,
         }),
@@ -1257,6 +1280,7 @@
       pause,
       retry,
       prepare,
+      updateResource: update_resource,
       startAll: start_all,
       pauseAll: pause_all,
       clear: clear_all,
@@ -1528,6 +1552,12 @@
         throw error_value(preview.error, "Prepare download task failed");
       }
       return preview.data || preview;
+    }
+
+    async function update_resource(object) {
+      const r = await reqs.download.update_resource.run(object);
+      if (r.error) throw r.error;
+      return r.data;
     }
 
     async function fetch_task_page(params) {

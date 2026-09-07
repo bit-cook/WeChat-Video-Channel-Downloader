@@ -33,6 +33,8 @@ var (
 	_ adapter.RuntimeAdapter           = (*ChannelsAdapter)(nil)
 	_ adapter.RuntimeHandle            = (*ChannelsAdapter)(nil)
 	_ adapter.FetchDownloadTaskBuilder = (*ChannelsAdapter)(nil)
+	_ adapter.HomeContentsBuilder      = (*ChannelsAdapter)(nil)
+	_ adapter.HomeDetailsFetcher       = (*ChannelsAdapter)(nil)
 	_ adapter.Postprocessor            = (*ChannelsAdapter)(nil)
 	_ adapter.PlatformStatusDescriber  = (*ChannelsAdapter)(nil)
 	_ adapter.PlatformStatusRefresher  = (*ChannelsAdapter)(nil)
@@ -281,7 +283,7 @@ func publish_wxchannels_page_status(routes *WebsocketRoutes, bus *events.Bus) {
 	bus.Publish(events.PlatformStatusChanged{
 		Platform:  PlatformID,
 		Key:       wxchannels_status_key_page,
-		Name:      "视频号页面",
+		Name:      "视频号",
 		Status:    platform_status_name(available),
 		Available: available,
 		Reason:    reason,
@@ -297,7 +299,7 @@ func publish_wxchannels_sph_status(routes *WebsocketRoutes, bus *events.Bus) {
 	bus.Publish(events.PlatformStatusChanged{
 		Platform:  PlatformID,
 		Key:       wxchannels_status_key_sph,
-		Name:      "视频号分享链接",
+		Name:      "视频号分享",
 		Status:    platform_status_name(available),
 		Available: available,
 		Reason:    reason,
@@ -384,6 +386,7 @@ func new_interceptor_config(c *config.Config) wxchannels.InterceptorConfig {
 	}
 	return wxchannels.InterceptorConfig{
 		Version:               c.Version,
+		Mode:                  c.Mode,
 		DebugShowError:        c.GetBool("debug.error"),
 		DisableLocationToHome: c.GetBool("channels.disableLocationToHome"),
 		GlobalScriptPath:      c.GlobalScriptPath,

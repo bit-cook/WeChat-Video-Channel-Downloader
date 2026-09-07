@@ -155,15 +155,16 @@ func account_updates(existing *model.Account, account *model.Account, now int64)
 }
 
 type ContentListOptions struct {
-	AccountID string
-	Type      string
-	Scope     string
-	Keyword   string
-	StartAt   *int64 // Inclusive Unix timestamp in milliseconds.
-	EndAt     *int64 // Exclusive Unix timestamp in milliseconds.
-	Page      int
-	PageSize  int
-	Offset    *int
+	AccountID  string
+	PlatformID string
+	Type       string
+	Scope      string
+	Keyword    string
+	StartAt    *int64 // Inclusive Unix timestamp in milliseconds.
+	EndAt      *int64 // Exclusive Unix timestamp in milliseconds.
+	Page       int
+	PageSize   int
+	Offset     *int
 }
 
 const (
@@ -351,8 +352,8 @@ type ContentDetailItem struct {
 }
 
 // ContentEmbeddedDetailItem exposes the extension data for media directly
-// contained by an article. The media remains independently addressable while
-// article clients can render its assets as part of the article itself.
+// contained by an article, post, or album. The media remains independently
+// addressable while clients can render its assets as part of the parent.
 type ContentEmbeddedDetailItem struct {
 	RelationType string        `json:"relation_type"`
 	SortOrder    int           `json:"sort_order"`
@@ -362,6 +363,7 @@ type ContentEmbeddedDetailItem struct {
 }
 
 var embedded_content_parent_types = []string{
+	model.ContentTypeAlbum,
 	model.ContentTypeArticle,
 	model.ContentTypePost,
 	model.ContentTypeWebpage,
@@ -395,6 +397,18 @@ func content_supports_embedded_media(content_type string) bool {
 	return false
 }
 
+// Keep list totals and account counts consistent with embedded detail rendering.
+// Existing child records stay addressable and need no data migration.
+func exclude_embedded_contents(query *gorm.DB) *gorm.DB {
+	return query.Where(`NOT EXISTS (
+		SELECT 1 FROM content_relation AS relation
+		JOIN content AS parent ON parent.id = relation.source_content_id
+		WHERE relation.target_content_id = content.id AND relation.type = ?
+			AND parent.id <> content.id AND parent.deleted_at IS NULL
+			AND parent.type IN ? AND content.type IN ?
+	)`, model.ContentRelationContains, embedded_content_parent_types, embedded_content_media_types)
+}
+
 type ContentListResult struct {
 	List     []ContentListItem `json:"list"`
 	Total    int64             `json:"total"`
@@ -402,10 +416,14 @@ type ContentListResult struct {
 	PageSize int               `json:"page_size"`
 }
 
-func sort_content_resources_by_created_at_desc(resources []ContentResourceRecord) {
+func sort_content_resources(resources []ContentResourceRecord, content_type string) {
+	is_album := content_type == model.ContentTypeAlbum || content_type == "image_set"
 	sort.SliceStable(resources, func(left_index, right_index int) bool {
 		left := resources[left_index]
 		right := resources[right_index]
+		if is_album && left.MergeOrder != right.MergeOrder {
+			return left.MergeOrder < right.MergeOrder
+		}
 		if left.CreatedAt != right.CreatedAt {
 			return left.CreatedAt > right.CreatedAt
 		}
@@ -1359,7 +1377,7 @@ func (s *ContentService) GetContentDetail(content_id string) (*ContentDetailItem
 		}
 		resources = append(resources, resources_by_content_id[effective_content_id]...)
 	}
-	sort_content_resources_by_created_at_desc(resources)
+	sort_content_resources(resources, content.Type)
 	detail_type, detail, err := s.load_content_extension(content)
 	if err != nil {
 		return nil, err
@@ -1441,7 +1459,7 @@ func (s *ContentService) ListContents(options ContentListOptions) (*ContentListR
 	}
 
 	build_query := func() *gorm.DB {
-		query := s.db.Model(&model.Content{})
+		query := exclude_embedded_contents(s.db.Model(&model.Content{}).Where("content.deleted_at IS NULL"))
 		if scope == ContentListScopeTask {
 			query = query.Where(`EXISTS (
 				SELECT 1
@@ -1452,6 +1470,9 @@ func (s *ContentService) ListContents(options ContentListOptions) (*ContentListR
 		}
 		if content_type := strings.TrimSpace(options.Type); content_type != "" {
 			query = query.Where("content.type = ?", content_type)
+		}
+		if platform_id := strings.TrimSpace(options.PlatformID); platform_id != "" {
+			query = query.Where("content.platform_id = ?", platform_id)
 		}
 		if account_id := strings.TrimSpace(options.AccountID); account_id != "" {
 			query = query.

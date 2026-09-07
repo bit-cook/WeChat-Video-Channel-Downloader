@@ -5,6 +5,7 @@ import * as store from "./store.js";
 const {
   app$,
   history$,
+  hls_player$,
   http_client$,
   router,
   router$,
@@ -18,6 +19,7 @@ if (!Timeless) {
 }
 
 Timeless.ui.ScrollViewPrimitive.setScrollViewProvider(Timeless.web);
+Timeless.ui.InputPrimitive.setInputProvider(Timeless.web);
 
 window.config = window.__d_config || {};
 
@@ -103,35 +105,101 @@ window.API_ORIGIN = window.config.remoteServerEnabled
   ? "https://weixin110.qq.com"
   : window.config.apiOrigin || window.location.origin;
 
-window.PLATFORM_FAVICONS = Object.freeze({
-  wxchannels:
-    "https://res.wx.qq.com/t/wx_fed/finder/helper/finder-helper-web/res/favicon-v2.ico",
-  wxmp: "https://res.wx.qq.com/a/wx_fed/assets/res/NTI4MWU5.ico",
-  officialaccount: "https://res.wx.qq.com/a/wx_fed/assets/res/NTI4MWU5.ico",
-  zhihu: "https://static.zhihu.com/heifetz/favicon.ico",
-  douyin: "https://p-pc-weboff.byteimg.com/tos-cn-i-9r5gewecjs/favicon.png",
-  youtube: "https://www.youtube.com/s/desktop/0084d708/img/favicon.ico",
-  bilibili: "https://static.hdslb.com/images/favicon.ico",
-  cctv: "https://v.cctv.com/favicon.ico",
+const default_platform_favicon = "public/platform-icons.svg#default";
+const platform_favicons = Object.freeze({
+  default: default_platform_favicon,
+  wxchannels: "public/platform-icons.svg#wxchannels",
+  wxmp: "public/platform-icons.svg#wxmp",
+  weibo: "public/platform-icons.svg#weibo",
+  officialaccount: "public/platform-icons.svg#wxmp",
+  zhihu: "public/platform-icons.svg#zhihu",
+  juejin: "public/platform-icons.svg?v=20260907#juejin",
+  jianshu: "public/platform-icons.svg?v=20260907#jianshu",
+  douyin: "public/platform-icons.svg#douyin",
+  youtube: "public/platform-icons.svg#youtube",
+  bilibili: "public/platform-icons.svg#bilibili",
+  cctv: "public/platform-icons.svg#cctv",
+  ucdrive: "public/platform-icons.svg#ucdrive",
+  feishu: "public/platform-icons.svg#feishu",
+  x: "public/platform-icons.svg#x",
+  twitter: "public/platform-icons.svg#x",
+  instagram: "public/platform-icons.svg#instagram",
+  insgram: "public/platform-icons.svg#instagram",
+  telegram: "public/platform-icons.svg#telegram",
+  facebook: "public/platform-icons.svg#facebook",
+  threads: "public/platform-icons.svg#threads",
+  tiktok: "public/platform-icons.svg#tiktok",
+  reddit: "public/platform-icons.svg#reddit",
+  linkedin: "public/platform-icons.svg#linkedin",
+  pinterest: "public/platform-icons.svg#pinterest",
+  snapchat: "public/platform-icons.svg#snapchat",
+  whatsapp: "public/platform-icons.svg#whatsapp",
+  discord: "public/platform-icons.svg#discord",
+  twitch: "public/platform-icons.svg#twitch",
+  github: "public/platform-icons.svg#github",
+  stackoverflow: "public/platform-icons.svg#stackoverflow",
+  kuaishou: "public/platform-icons.svg#kuaishou",
+  xiaohongshu: "public/platform-icons.svg#xiaohongshu",
+  xhs: "public/platform-icons.svg#xiaohongshu",
+  fanqienovel: "public/platform-icons.svg#fanqienovel",
+  douban: "public/platform-icons.svg#douban",
+  tieba: "public/platform-icons.svg#tieba",
+  baidutieba: "public/platform-icons.svg#tieba",
+  qidian: "public/platform-icons.svg#qidian",
+});
+
+window.PLATFORM_FAVICONS = new Proxy(platform_favicons, {
+  get(target, property, receiver) {
+    const favicon = Reflect.get(target, property, receiver);
+    if (favicon !== undefined || typeof property !== "string" || !property) {
+      return favicon;
+    }
+    return default_platform_favicon;
+  },
 });
 
 window.PLATFORM_NAMES = Object.freeze({
   wxchannels: "视频号",
   wxmp: "公众号",
-  officialaccount: "公众号",
   douyin: "抖音",
-  bilibili: "Bilibili",
+  kuaishou: "快手",
   xiaohongshu: "小红书",
-  xhs: "小红书",
+  instagram: "Instagram",
   youtube: "YouTube",
-  zhihu: "知乎",
-  douban: "豆瓣",
+  bilibili: "Bilibili",
+  x: "X",
   weibo: "微博",
-  qidian: "起点中文网",
-  fanqienovel: "番茄小说",
-  "69shuba": "69书吧",
-  ttk: "TT看书",
-  webpage: "网页",
+  zhihu: "知乎",
+  // juejin: "掘金",
+  // jianshu: "简书",
+  // webpage: "网页",
+  singlefile: "网页",
+  // officialaccount: "公众号",
+  // twitter: "X",
+  // insgram: "Instagram",
+  // telegram: "Telegram",
+  // facebook: "Facebook",
+  // threads: "Threads",
+  // tiktok: "TikTok",
+  // reddit: "Reddit",
+  // linkedin: "LinkedIn",
+  // pinterest: "Pinterest",
+  // snapchat: "Snapchat",
+  // whatsapp: "WhatsApp",
+  // discord: "Discord",
+  // twitch: "Twitch",
+  // github: "GitHub",
+  // stackoverflow: "Stack Overflow",
+  // xhs: "小红书",
+  // douban: "豆瓣",
+  // tieba: "百度贴吧",
+  // baidutieba: "百度贴吧",
+  // qidian: "起点中文网",
+  // fanqienovel: "番茄小说",
+  // jianshu: "简书",
+  // "69shuba": "69书吧",
+  // ttk: "TT看书",
+  // ucdrive: "UC网盘",
 });
 
 window.CONTENT_TYPE_NAMES = Object.freeze({
@@ -238,6 +306,7 @@ function ApplicationRootView() {
       app: app$,
       client: http_client$,
       history: history$,
+      hlsPlayer: hls_player$,
       storage: storage$,
       view: history$.$view,
       views: router.views,

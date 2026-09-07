@@ -3,11 +3,14 @@ package api
 import (
 	"errors"
 	"strconv"
+	"strings"
 
 	"github.com/gin-gonic/gin"
 	"gorm.io/gorm"
 
+	"wx_channel/internal/adapter"
 	result "wx_channel/internal/apiresult"
+	"wx_channel/internal/database/model"
 	"wx_channel/internal/services"
 )
 
@@ -189,10 +192,11 @@ func (c *APIClient) handle_account_list(ctx *gin.Context) {
 		page_size = 200
 	}
 	page_result, err := c.account_service.ListAccounts(ctx.Request.Context(), services.AccountListInput{
-		Page:      page,
-		PageSize:  page_size,
-		Keyword:   ctx.Query("keyword"),
-		AccountID: ctx.Query("account_id"),
+		Page:       page,
+		PageSize:   page_size,
+		Keyword:    ctx.Query("keyword"),
+		AccountID:  ctx.Query("account_id"),
+		PlatformID: ctx.Query("platform_id"),
 	})
 	if err != nil {
 		result.Err(ctx, 500, err.Error())
@@ -220,5 +224,128 @@ func (c *APIClient) handle_account_list(ctx *gin.Context) {
 		"total":     page_result.Total,
 		"page":      page_result.Page,
 		"page_size": page_result.PageSize,
+	})
+}
+
+func (c *APIClient) handle_account_details_content_list(ctx *gin.Context) {
+	if c.db == nil {
+		result.Err(ctx, 500, "数据库未初始化")
+		return
+	}
+	account_id := strings.TrimSpace(ctx.Query("id"))
+	if account_id == "" {
+		result.Err(ctx, 400, "id 不能为空")
+		return
+	}
+
+	var account model.Account
+	if err := c.db.WithContext(ctx.Request.Context()).First(&account, "id = ?", account_id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			result.Err(ctx, 404, "账号不存在")
+			return
+		}
+		result.Err(ctx, 500, err.Error())
+		return
+	}
+
+	handler := adapter.Get(account.PlatformId)
+	if handler == nil {
+		result.Err(ctx, 400, "不支持的平台: "+account.PlatformId)
+		return
+	}
+	details_fetcher, ok := handler.(adapter.HomeDetailsFetcher)
+	if !ok {
+		result.Err(ctx, 400, "平台 "+account.PlatformId+" 不支持主页详情")
+		return
+	}
+	details, err := details_fetcher.FetchHomeDetails(&account, ctx.Param("scope"), ctx.Query("page"))
+	if err != nil {
+		result.Err(ctx, 400, err.Error())
+		return
+	}
+	if details == nil {
+		result.Err(ctx, 500, "平台 "+account.PlatformId+" 返回了空的主页详情结果")
+		return
+	}
+	result.Ok(ctx, details)
+}
+
+func (c *APIClient) handle_account_synchronize(ctx *gin.Context) {
+	if c.db == nil {
+		result.Err(ctx, 500, "数据库未初始化")
+		return
+	}
+	var body struct {
+		AccountID string `json:"account_id"`
+		Scope     string `json:"scope"`
+	}
+	if err := ctx.ShouldBindJSON(&body); err != nil {
+		result.Err(ctx, 400, "不合法的请求参数: "+err.Error())
+		return
+	}
+	account_id := strings.TrimSpace(body.AccountID)
+	if account_id == "" {
+		result.Err(ctx, 400, "account_id 不能为空")
+		return
+	}
+
+	var account model.Account
+	if err := c.db.WithContext(ctx.Request.Context()).First(&account, "id = ?", account_id).Error; err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			result.Err(ctx, 404, "账号不存在")
+			return
+		}
+		result.Err(ctx, 500, err.Error())
+		return
+	}
+	handler := adapter.Get(account.PlatformId)
+	if handler == nil {
+		result.Err(ctx, 400, "不支持的平台: "+account.PlatformId)
+		return
+	}
+	home_builder, ok := handler.(adapter.HomeContentsBuilder)
+	if !ok {
+		result.Err(ctx, 400, "平台 "+account.PlatformId+" 不支持主页同步")
+		return
+	}
+	tabs := home_builder.HomeContentTabs(&account)
+	if len(tabs) == 0 {
+		result.Err(ctx, 400, "平台 "+account.PlatformId+" 没有可用的主页内容 tab")
+		return
+	}
+	scope := strings.TrimSpace(body.Scope)
+	if scope == "" {
+		result.Ok(ctx, gin.H{
+			"tabs":  tabs,
+			"list":  []model.Content{},
+			"total": 0,
+		})
+		return
+	}
+	valid_scope := false
+	for _, tab := range tabs {
+		if tab.Scope == scope {
+			valid_scope = true
+			break
+		}
+	}
+	if !valid_scope {
+		result.Err(ctx, 400, "平台 "+account.PlatformId+" 不支持主页 scope: "+scope)
+		return
+	}
+	home_contents, err := home_builder.BuildHomeContents(&account, scope)
+	if err != nil {
+		result.Err(ctx, 400, err.Error())
+		return
+	}
+	if home_contents == nil {
+		result.Err(ctx, 500, "平台 "+account.PlatformId+" 返回了空的主页内容结果")
+		return
+	}
+	result.Ok(ctx, gin.H{
+		"tabs":  tabs,
+		"scope": home_contents.Scope,
+		"list":  home_contents.Contents,
+		"total": len(home_contents.Contents),
 	})
 }

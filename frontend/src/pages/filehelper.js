@@ -1,7 +1,5 @@
-import {
-  FileHelperViewModel,
-  event_target_element,
-} from "./filehelper.model.js";
+import { Tag, PlatformTag } from "../dmui.js";
+import { FileHelperViewModel } from "./filehelper.model.js";
 
 function FileHelperHeaderView(props) {
   const vm$ = props.store;
@@ -24,8 +22,8 @@ function FileHelperHeaderView(props) {
           (status) => status !== "idle",
         ),
         ok() {
-          return View(
-            { class: "filehelper-channels-status dm-badge dm-badge--info" },
+          return Tag(
+            { name: "filehelper-channels-status", variant: "info", class: "filehelper-channels-status" },
             [
             "视频号API: ",
             View(
@@ -41,8 +39,9 @@ function FileHelperHeaderView(props) {
           );
         },
       }),
-      View(
+      Tag(
         {
+          name: "filehelper-status",
           class: computed(vm$.state.logged_in, (logged_in) =>
             logged_in
               ? "filehelper-status is-online"
@@ -147,7 +146,7 @@ function FileHelperLoginView(props) {
   const vm$ = props.store;
   return View({ class: "filehelper-login" }, [
     View({ class: "filehelper-login-copy" }, [
-      View({ class: "filehelper-login-eyebrow" }, ["微信连接"]),
+      Tag({ name: "filehelper-login-eyebrow", class: "filehelper-login-eyebrow" }, ["微信连接"]),
       View({ as: "h1", class: "filehelper-login-title" }, [
         "把手机里的内容，直接送到工作台",
       ]),
@@ -195,16 +194,10 @@ function FileHelperFinderMessageView(props) {
   const cover_url = data.cover_url || data.thumb_url || "";
   return View({ class: "filehelper-finder-card" }, [
     cover_url
-      ? Timeless.Img({
+      ? LazyImg({
           class: "filehelper-finder-cover",
           src: cover_url,
           alt: "封面",
-          onError(event) {
-            const target = event_target_element(event);
-            if (target) {
-              target.style.display = "none";
-            }
-          },
         })
       : null,
     View({ class: "filehelper-finder-content" }, [
@@ -213,20 +206,14 @@ function FileHelperFinderMessageView(props) {
       ]),
       View({ class: "filehelper-finder-author" }, [
         data.avatar
-          ? Timeless.Img({
+          ? LazyImg({
               class: "filehelper-finder-avatar",
               src: data.avatar,
               alt: "头像",
-              onError(event) {
-                const target = event_target_element(event);
-                if (target) {
-                  target.style.display = "none";
-                }
-              },
             })
           : null,
         View({ class: "filehelper-finder-nickname" }, [data.nickname]),
-        View({ class: "filehelper-finder-badge" }, ["视频号"]),
+        PlatformTag({ class: "filehelper-finder-badge", name: "filehelper-finder-platform", label: "视频号", favicon: (window.PLATFORM_FAVICONS || {}).wxchannels }),
       ].filter(Boolean)),
     ]),
   ].filter(Boolean));

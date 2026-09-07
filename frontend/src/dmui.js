@@ -4,7 +4,7 @@ if (!Runtime) {
   throw new Error("组件库无法启动：Timeless 运行时未加载");
 }
 
-const { Fragment, For, Match, Show, View, combine, computed, ref, refobj } = Runtime;
+const { Fragment, For, Match, Show, View, Img, combine, computed, ref, refobj } = Runtime;
 const { ui, vm } = Runtime;
 
 function class_names(values) {
@@ -68,29 +68,6 @@ function dispose_owned_store(store) {
   }
 }
 
-function lazy_img_dom_element(event) {
-  let target = event && event.target ? event.target : event;
-  for (let depth = 0; depth < 4; depth += 1) {
-    if (
-      target &&
-      target.nodeType === 1 &&
-      typeof target.addEventListener === "function"
-    ) {
-      return target;
-    }
-    if (target && typeof target.get$elm === "function") {
-      target = target.get$elm();
-      continue;
-    }
-    if (target && target.$elm) {
-      target = target.$elm;
-      continue;
-    }
-    break;
-  }
-  return null;
-}
-
 function lazy_img_source(value) {
   const resolved = source_value(value, "");
   if (resolved === null || resolved === undefined) {
@@ -100,95 +77,79 @@ function lazy_img_source(value) {
 }
 
 function create_lazy_img_model(props) {
-  let image = null;
-  let settled = false;
-  let current_src = lazy_img_source(props.src);
-  let current_srcset = lazy_img_source(props.srcset);
+  const eager = props.loading === "eager";
   const failed_ = ref(false);
+  const exposed_ = ref(eager);
+  const loaded_ = ref(false);
+  const src_ = ref(eager ? lazy_img_source(props.src) : "");
+  const srcset_ = ref(eager ? lazy_img_source(props.srcset) : "");
   const unlistens = [];
+  let exposed = eager;
 
   function handle_load(event) {
-    settled = true;
-    image?.setAttribute("data-lazy-img-state", "loaded");
     failed_.as(false);
+    loaded_.as(true);
     if (typeof props.onLoad === "function") {
       props.onLoad(event);
     }
   }
 
   function handle_error(event) {
-    settled = true;
-    image?.setAttribute("data-lazy-img-state", "error");
+    console.log('handle error', event);
     failed_.as(true);
+    loaded_.as(false);
     if (typeof props.onError === "function") {
       props.onError(event);
     }
   }
 
   function reset_failure() {
-    settled = false;
     failed_.as(false);
+    loaded_.as(false);
   }
 
-  function detach_image() {
-    if (!image) return;
-    image.removeEventListener("load", handle_load);
-    image.removeEventListener("error", handle_error);
-    image = null;
-    settled = false;
+  function expose() {
+    if (exposed) return;
+    exposed = true;
+    srcset_.as(lazy_img_source(props.srcset));
+    src_.as(lazy_img_source(props.src));
+    exposed_.as(true);
   }
 
-  const src_unlisten = subscribe_source(props.src, (value) => {
-    current_src = lazy_img_source(value);
+  function sync_source() {
     reset_failure();
-  });
-  const srcset_unlisten = subscribe_source(props.srcset, (value) => {
-    current_srcset = lazy_img_source(value);
-    reset_failure();
-  });
+    if (!exposed) return;
+    srcset_.as(lazy_img_source(props.srcset));
+    src_.as(lazy_img_source(props.src));
+  }
+
+  const src_unlisten = subscribe_source(props.src, sync_source);
+  const srcset_unlisten = subscribe_source(props.srcset, sync_source);
   if (src_unlisten) unlistens.push(src_unlisten);
   if (srcset_unlisten) unlistens.push(srcset_unlisten);
 
   return {
     state: {
       failed: failed_,
+      exposed: exposed_,
+      loaded: loaded_,
+      src: src_,
+      srcset: srcset_,
     },
     methods: {
-      mount(event) {
-        image = lazy_img_dom_element(event);
-        if (image) {
-          image.setAttribute("data-lazy-img-state", "loading");
-          image.addEventListener("load", handle_load);
-          image.addEventListener("error", handle_error);
-          if (image.complete && (current_src || current_srcset)) {
-            const mounted_image = image;
-            queueMicrotask(() => {
-              if (image !== mounted_image || settled) return;
-              if (mounted_image.naturalWidth > 0) {
-                handle_load({ target: mounted_image });
-              } else {
-                handle_error({ target: mounted_image });
-              }
-            });
-          }
-        }
-        if (typeof props.onMounted === "function") {
-          props.onMounted(event);
-        }
-      },
+      expose,
       load: handle_load,
       error: handle_error,
-      unmount_image: detach_image,
       destroy() {
-        detach_image();
         while (unlistens.length > 0) {
           const unlisten = unlistens.pop();
           if (typeof unlisten === "function") unlisten();
         }
         failed_.destroy?.();
-        if (typeof props.onUnmounted === "function") {
-          props.onUnmounted();
-        }
+        exposed_.destroy?.();
+        loaded_.destroy?.();
+        src_.destroy?.();
+        srcset_.destroy?.();
       },
     },
   };
@@ -209,8 +170,10 @@ function lazy_img_attributes(props) {
     height: props.height,
     loading: props.loading || "lazy",
     decoding: props.decoding,
+    srcset: props.srcset,
     crossorigin: props.crossOrigin,
     sizes: props.sizes,
+    "data-lazy-img-state": props.loaded,
     referrerpolicy: props.referrerPolicy,
     fetchpriority: props.fetchPriority,
     usemap: props.useMap,
@@ -241,12 +204,35 @@ function lazy_img_failure_attributes(props) {
     "ismap",
   ].forEach((name) => delete attributes[name]);
   attributes["data-lazy-img-state"] = "error";
+  attributes.n = attributes.n || "lazy-img-error";
   attributes.role = attributes.role || "img";
   attributes["aria-label"] =
     attributes["aria-label"] ||
     (alt ? `${alt}（图片加载失败）` : "图片加载失败");
   attributes.title = attributes.title || "图片加载失败";
   return attributes;
+}
+
+function lazy_img_failure_mark() {
+  return View({
+    class: "dm-lazy-img-error-symbol",
+    attributes: {
+      n: "lazy-img-error-symbol",
+      "aria-hidden": "true",
+    },
+  });
+}
+
+function lazy_img_placeholder(props) {
+  return View({
+    class: static_classes([props.class, "dm-lazy-img-placeholder"]),
+    style: props.style,
+    attributes: {
+      n: "lazy-img-placeholder",
+      "aria-hidden": "true",
+    },
+    onExpose: props.onExpose,
+  });
 }
 
 export function LazyImg(props = {}) {
@@ -266,6 +252,7 @@ export function LazyImg(props = {}) {
     isMap,
     onLoad,
     onError,
+    onExpose,
     onMounted,
     onUnmounted,
     attributes,
@@ -277,16 +264,16 @@ export function LazyImg(props = {}) {
   const model = create_lazy_img_model({
     src: image_src,
     srcset: image_srcset,
+    loading,
     onLoad,
     onError,
-    onMounted,
-    onUnmounted,
   });
 
   return Fragment(
     {
       onUnmounted() {
         model.methods.destroy();
+        if (typeof onUnmounted === "function") onUnmounted();
       },
     },
     [
@@ -299,35 +286,60 @@ export function LazyImg(props = {}) {
               class: static_classes([rest.class, "dm-lazy-img-error"]),
               attributes: lazy_img_failure_attributes({ attributes, alt }),
             },
-            [Runtime.Icon({ name: "file", size: 18 })],
+            [lazy_img_failure_mark()],
           );
         },
         else() {
-          return Runtime.Img({
-            ...rest,
-            src: image_src,
-            srcset: image_srcset,
-            attributes: lazy_img_attributes({
-              attributes,
-              alt,
-              width,
-              height,
-              loading,
-              decoding,
-              crossOrigin,
-              sizes,
-              referrerPolicy,
-              fetchPriority,
-              useMap,
-              isMap,
-            }),
-            onMounted(event) {
-              model.methods.mount(event);
+          return View(
+            {
+              class: static_classes([rest.class, "dm-lazy-img-frame"]),
+              style: rest.style,
+              attributes: { n: "lazy-img-frame" },
             },
-            onUnmounted() {
-              model.methods.unmount_image();
-            },
-          });
+            [
+              lazy_img_placeholder({
+                onExpose(event) {
+                  model.methods.expose(event);
+                },
+              }),
+              Show({
+                when: model.state.exposed,
+                ok() {
+                  return Img({
+                    ...rest,
+                    class: static_classes([rest.class, "dm-lazy-img-image"]),
+                    src: model.state.src,
+                    attributes: lazy_img_attributes({
+                      attributes,
+                      alt,
+                      width,
+                      height,
+                      loading,
+                      decoding,
+                      srcset: model.state.srcset,
+                      loaded: model.state.loaded,
+                      crossOrigin,
+                      sizes,
+                      referrerPolicy,
+                      fetchPriority,
+                      useMap,
+                      isMap,
+                    }),
+                    onLoad: model.methods.load,
+                    onError: model.methods.error,
+                    onExpose(event) {
+                      model.methods.expose();
+                      if (typeof onExpose === "function") onExpose(event);
+                    },
+                    onMounted,
+                  });
+                },
+                else() {
+                  return null;
+                },
+              }),
+            ],
+          );
         },
       }),
     ],
@@ -645,12 +657,31 @@ export function Input(props) {
   );
 }
 
+export function ArrayField(props = {}) {
+  const { store: provided_store, render, onUnmounted, ...rest } = props;
+  const store = require_store("ArrayField", provided_store, vm.ArrayFieldCore);
+  const fields_ = ref(store.fields.slice());
+  const unlisten = store.onStateChange(() => fields_.as(store.fields.slice()));
+  return View({
+    ...rest,
+    class: class_names(["dm-array-field", rest.class]),
+    attributes: { n: "array-field", ...rest.attributes },
+    onUnmounted() {
+      unlisten();
+      if (typeof onUnmounted === "function") onUnmounted();
+    },
+  }, [For({ each: fields_, key: "id", render })]);
+}
+
 export function Textarea(props) {
   const {
     store: provided_store,
     class: extra_class,
     rootClass,
     showCount = false,
+    rootAttributes,
+    attributes,
+    onMounted,
     onUnmounted,
     onKeyDown,
     ...rest
@@ -663,6 +694,7 @@ export function Textarea(props) {
     {
       store,
       class: class_names(["dm-textarea-root", rootClass]),
+      attributes: { n: "textarea-root", ...rootAttributes },
       onUnmounted() {
         if (typeof unlisten === "function") unlisten();
         dispose_owned_store(store);
@@ -673,6 +705,16 @@ export function Textarea(props) {
       ui.TextareaPrimitive.Textarea({
         ...rest,
         store,
+        attributes: { n: "textarea-input", ...attributes },
+        onMounted(event) {
+          // Timeless 0.33 applies initial textarea attributes before the DOM exists.
+          const element = table_scroll_element(event);
+          for (const [name, source] of Object.entries({ n: "textarea-input", ...attributes })) {
+            const value = source_value(source);
+            if (value !== undefined && value !== null && value !== false) element.setAttribute(name, value === true ? "" : String(value));
+          }
+          if (typeof onMounted === "function") onMounted(event);
+        },
         class: class_names(["dm-field dm-textarea", extra_class]),
         onKeyDown(event) {
           store.handleKeyDown(event);
@@ -681,7 +723,7 @@ export function Textarea(props) {
       }),
       showCount
         ? ui.TextareaPrimitive.Count(
-            { store, class: "dm-textarea-count" },
+            { store, class: "dm-textarea-count", attributes: { n: "textarea-count" } },
             [],
           )
         : null,
@@ -1718,6 +1760,144 @@ export function DrawerFooter(props = {}, children = []) {
   );
 }
 
+function create_tooltip_model(store) {
+  let hide_timeout = null;
+  let content_hovered = false;
+  const layer = new vm.DismissableLayerCore();
+  layer.setRect(() => store.popper.floating?.getRect());
+  layer.addBranch(() => store.popper.reference?.getRect());
+
+  function clear_hide() {
+    clearTimeout(hide_timeout);
+    hide_timeout = null;
+  }
+
+  function hide() {
+    clear_hide();
+    layer.unregister();
+    store.hide();
+  }
+
+  function show() {
+    clear_hide();
+    store.show();
+    layer.register();
+  }
+
+  function schedule_hide() {
+    clear_hide();
+    hide_timeout = setTimeout(hide, 240);
+  }
+
+  const unlisten_dismiss = layer.onDismiss(hide);
+
+  return {
+    show,
+    hide,
+    schedule_hide,
+    enter_content() {
+      content_hovered = true;
+      show();
+    },
+    leave_content() {
+      content_hovered = false;
+      schedule_hide();
+    },
+    blur() {
+      if (!content_hovered) hide();
+    },
+    destroy() {
+      hide();
+      unlisten_dismiss();
+      store.presence.unmount();
+    },
+  };
+}
+
+export function Tooltip(props, children = []) {
+  const {
+    store: provided_store, content, class: extra_class, attributes,
+    onContentMouseEnter, onContentMouseLeave,
+  } = props;
+  const store = require_store("Tooltip", provided_store);
+  const model = create_tooltip_model(store);
+  const tooltip_id = `dm-tooltip-${store.unique_id}`;
+  const state_ = refobj(store.state);
+  const unlisten = store.onStateChange((state) => state_.as(state));
+
+  return Fragment(
+    {
+      onUnmounted() {
+        unlisten();
+        state_.destroy();
+        model.destroy();
+      },
+    },
+    [
+      View(
+        {
+          class: "dm-tooltip-trigger dm-focus-ring",
+          attributes: {
+            n: "tooltip-trigger",
+            tabindex: "0",
+            "aria-describedby": tooltip_id,
+            ...attributes,
+          },
+          onMounted({ target }) {
+            store.popper.setReference({
+              $el: target,
+              getRect: () => target.getBoundingClientRect(),
+            });
+          },
+          onMouseEnter: model.show,
+          onMouseLeave: model.schedule_hide,
+          onFocus: model.show,
+          onBlur: model.blur,
+          onKeyDown(event) {
+            if (event.key === "Escape") model.hide();
+          },
+        },
+        children,
+      ),
+      Runtime.Portal({}, [
+        ui.PopperPrimitive.Content(
+          {
+            store: store.popper,
+            zIndex: 1100,
+            attributes: { n: "tooltip-positioner" },
+            style: computed(state_, (state) => ({
+              display: state.visible ? "block" : "none",
+            })),
+            onReferenceOutOfView: model.hide,
+            onMouseEnter(event) {
+              model.enter_content();
+              if (typeof onContentMouseEnter === "function") onContentMouseEnter(event);
+            },
+            onMouseLeave(event) {
+              model.leave_content();
+              if (typeof onContentMouseLeave === "function") onContentMouseLeave(event);
+            },
+          },
+          [
+            ui.TooltipPrimitive.Content(
+              {
+                store,
+                class: class_names(["dm-tooltip-content", extra_class]),
+                attributes: {
+                  n: "tooltip-content",
+                  id: tooltip_id,
+                  role: "tooltip",
+                },
+              },
+              [content],
+            ),
+          ],
+        ),
+      ]),
+    ],
+  );
+}
+
 export function Popover(props, children = []) {
   const {
     store: provided_store,
@@ -2313,21 +2493,170 @@ export function Label(props = {}, children = []) {
   );
 }
 
-export function Badge(props = {}, children = []) {
-  const { variant = "default", ...rest } = props;
+export function Tag(props = {}, children = []) {
+  const { variant = "default", name = "tag", ...rest } = props;
   const variants = {
     default: "",
-    success: "dm-badge--success",
-    warning: "dm-badge--warning",
-    destructive: "dm-badge--danger",
-    danger: "dm-badge--danger",
-    info: "dm-badge--info",
+    success: "dm-tag--success",
+    warning: "dm-tag--warning",
+    destructive: "dm-tag--danger",
+    danger: "dm-tag--danger",
+    info: "dm-tag--info",
   };
   return View(
     {
+      as: "span",
       ...rest,
-      class: class_names(["dm-badge", variants[variant] || "", rest.class]),
-      attributes: { n: "badge", ...(rest.attributes || {}) },
+      class: class_names(["dm-tag", variants[variant] || "", rest.class]),
+      attributes: { n: name, ...(rest.attributes || {}) },
+    },
+    children,
+  );
+}
+
+export function PlatformIcon(props = {}) {
+  const favicon = String(source_value(props.favicon, "") || "");
+  if (!favicon.includes("#")) return null;
+  const semantic_name = props.name || "platform-icon";
+  return Runtime.SVG.SVG(
+    {
+      class: props.class,
+      attributes: {
+        n: semantic_name,
+        viewBox: "0 0 32 32",
+        "aria-hidden": "true",
+        focusable: "false",
+        ...(props.attributes || {}),
+      },
+    },
+    [
+      Runtime.SVG.Use({
+        attributes: { n: `${semantic_name}-symbol`, href: props.favicon },
+      }),
+    ],
+  );
+}
+
+export function PlatformTag(props = {}) {
+  const { favicon, label, name = "platform-tag", ...rest } = props;
+  return Tag(
+    {
+      ...rest,
+      name,
+      class: class_names(["dm-platform-tag", rest.class]),
+    },
+    [
+      Show({
+        when: favicon,
+        ok() {
+          return PlatformIcon({
+            class: "dm-platform-tag__icon",
+            favicon,
+            name: `${name}-icon`,
+          });
+        },
+      }),
+      View(
+        {
+          as: "span",
+          class: "dm-platform-tag__label",
+          attributes: { n: `${name}-label` },
+        },
+        Array.isArray(label) ? label : [label ?? ""],
+      ),
+    ],
+  );
+}
+
+export { Tag as Badge };
+
+function tabs_handle_keydown(event, orientation) {
+  const key = event && event.key;
+  const previous_key = orientation === "vertical" ? "ArrowUp" : "ArrowLeft";
+  const next_key = orientation === "vertical" ? "ArrowDown" : "ArrowRight";
+  if (![previous_key, next_key, "Home", "End"].includes(key)) return;
+
+  const tablist = event.currentTarget;
+  const tabs = Array.from(
+    tablist.querySelectorAll('[role="tab"]:not([disabled])'),
+  );
+  if (tabs.length === 0) return;
+
+  const current_index = tabs.indexOf(event.target.closest('[role="tab"]'));
+  let next_index = current_index < 0 ? 0 : current_index;
+  if (key === "Home") next_index = 0;
+  else if (key === "End") next_index = tabs.length - 1;
+  else if (key === previous_key) {
+    next_index = (next_index - 1 + tabs.length) % tabs.length;
+  } else {
+    next_index = (next_index + 1) % tabs.length;
+  }
+
+  event.preventDefault();
+  tabs[next_index].focus();
+  tabs[next_index].click();
+}
+
+export function Tabs(props = {}, children = []) {
+  const {
+    class: extra_class,
+    each,
+    key = "value",
+    orientation = "horizontal",
+    onKeyDown,
+    render,
+    ...rest
+  } = props;
+  const tab_children = each && typeof render === "function"
+    ? [For({ each, key, render })]
+    : children;
+  return View(
+    {
+      ...rest,
+      class: class_names(["dm-tabs", extra_class]),
+      attributes: {
+        n: "tabs",
+        role: "tablist",
+        "aria-orientation": orientation,
+        ...(rest.attributes || {}),
+      },
+      onKeyDown(event) {
+        tabs_handle_keydown(event, orientation);
+        if (typeof onKeyDown === "function") onKeyDown(event);
+      },
+    },
+    tab_children,
+  );
+}
+
+export function Tab(props = {}, children = []) {
+  const {
+    class: extra_class,
+    selected = false,
+    ...rest
+  } = props;
+  const selected_class = is_source(selected)
+    ? computed(selected, (value) => value ? "is-active" : "")
+    : selected ? "is-active" : "";
+  const aria_selected = is_source(selected)
+    ? computed(selected, (value) => String(Boolean(value)))
+    : String(Boolean(selected));
+  const tab_index = is_source(selected)
+    ? computed(selected, (value) => value ? "0" : "-1")
+    : selected ? "0" : "-1";
+  return View(
+    {
+      ...rest,
+      type: "button",
+      class: class_names(["dm-tab dm-focus-ring", selected_class, extra_class]),
+      attributes: {
+        n: "tab",
+        type: "button",
+        role: "tab",
+        "aria-selected": aria_selected,
+        tabindex: tab_index,
+        ...(rest.attributes || {}),
+      },
     },
     children,
   );
@@ -2399,6 +2728,408 @@ export function CardFooter(props = {}, children = []) {
   );
 }
 
+function waterfall_dom_element(event) {
+  let target = event && (event.currentTarget || event.target || event);
+  for (let depth = 0; depth < 4; depth += 1) {
+    if (target && typeof target.get$elm === "function") {
+      target = target.get$elm();
+      continue;
+    }
+    if (target && target.$elm) {
+      target = target.$elm;
+      continue;
+    }
+    if (
+      target &&
+      typeof target.addEventListener === "function" &&
+      typeof target.getBoundingClientRect === "function"
+    ) {
+      return target;
+    }
+    break;
+  }
+  return null;
+}
+
+function waterfall_item_key(item, index, key) {
+  const value = typeof key === "function"
+    ? key(item, index)
+    : key && item && typeof item === "object"
+      ? item[key]
+      : index;
+  return value === undefined || value === null || value === ""
+    ? index
+    : value;
+}
+
+let waterfall_id_seed = 0;
+
+function create_waterfall_id() {
+  waterfall_id_seed += 1;
+  return `dm-waterfall-${waterfall_id_seed}`;
+}
+
+// Waterfall virtualizes every masonry column independently while sharing one
+// scroll viewport. Records are inserted into the currently shortest column.
+export function Waterfall(props = {}) {
+  const {
+    each,
+    render,
+    footer,
+    key = "id",
+    columns,
+    minColumnWidth = 240,
+    maxColumns = 4,
+    gap = 16,
+    itemHeight = 280,
+    size = 8,
+    buffer = 3,
+    paddingBottom = 0,
+    reachBottomThreshold = 240,
+    onItemResize,
+    onReachBottom,
+    onScroll,
+    onMounted,
+    onUnmounted,
+    class: extra_class,
+    style: extra_style,
+    attributes: extra_attributes,
+    ...view_props
+  } = props;
+  const scroll_top_ = ref(0);
+  const waterfall_id = create_waterfall_id();
+  const viewport_height_ = ref(1);
+  const column_width_ = ref(Math.max(1, Number(minColumnWidth) || 240));
+  const column_records_ = Runtime.refarr([]);
+  const measured_heights = new Map();
+  const column_assignments = new Map();
+  const column_sources = [];
+  const cleanups = [];
+  let root = null;
+  let resize_observer = null;
+  let resize_handler = null;
+  let distribute_frame = 0;
+  let fallback_mount_timer = 0;
+  let fallback_mount_attempts = 0;
+  let root_width = 0;
+  let layout_column_count = 0;
+  let layout_column_width = 0;
+  let reached_bottom = false;
+
+  function requested_column_count(width) {
+    const fixed_count = Math.floor(Number(source_value(columns, 0)) || 0);
+    if (fixed_count > 0) return fixed_count;
+    const column_gap = Math.max(0, Number(source_value(gap, 16)) || 0);
+    const minimum_width = Math.max(
+      1,
+      Number(source_value(minColumnWidth, 240)) || 240,
+    );
+    const maximum = Math.max(
+      1,
+      Math.floor(Number(source_value(maxColumns, 4)) || 4),
+    );
+    return Math.max(
+      1,
+      Math.min(maximum, Math.floor((Math.max(0, width) + column_gap) /
+        (minimum_width + column_gap)) || 1),
+    );
+  }
+
+  function ensure_columns(count) {
+    const current = column_records_.value || [];
+    if (current.length === count) return current;
+    const next = Array.from({ length: count }, (_, index) => {
+      if (current[index]) return current[index];
+      const items_ = Runtime.refarr([]);
+      column_sources.push(items_);
+      return { id: `waterfall-column-${index}`, index, items_, height: 0 };
+    });
+    column_records_.as(next, { reset: true });
+    return next;
+  }
+
+  function estimated_item_height(item, index) {
+    const fallback = 280;
+    const value = typeof itemHeight === "function"
+      ? itemHeight(item, index, column_width_.value)
+      : source_value(itemHeight, fallback);
+    const height = Number(value);
+    return Number.isFinite(height) && height > 0 ? height : fallback;
+  }
+
+  function distribute() {
+    distribute_frame = 0;
+    const records = Array.isArray(source_value(each, []))
+      ? source_value(each, [])
+      : [];
+    const width = root ? root.clientWidth : 0;
+    const column_gap = Math.max(0, Number(source_value(gap, 16)) || 0);
+    const column_count = requested_column_count(width);
+    const target_columns = ensure_columns(column_count);
+    if (!root || width <= 0) {
+      target_columns.forEach((column) => {
+        if ((column.items_.value || []).length > 0) {
+          column.items_.as([], { reset: true });
+        }
+      });
+      return;
+    }
+    const column_width = Math.max(
+      1,
+      (Math.max(width, Number(source_value(minColumnWidth, 240)) || 240) -
+        column_gap * (column_count - 1)) /
+        column_count,
+    );
+    const layout_changed = layout_column_count !== column_count ||
+      Math.abs(layout_column_width - column_width) >= 1;
+    if (layout_changed) {
+      measured_heights.clear();
+      column_assignments.clear();
+      layout_column_count = column_count;
+      layout_column_width = column_width;
+    }
+    if (Math.abs(column_width_.value - column_width) >= 1) {
+      column_width_.as(column_width);
+    }
+    const buckets = Array.from({ length: column_count }, () => []);
+    const heights = Array.from({ length: column_count }, () => 0);
+    const key_occurrences = new Map();
+    const active_height_keys = new Set();
+
+    records.forEach((item, index) => {
+      const source_key = waterfall_item_key(item, index, key);
+      const key_base = `${typeof source_key}:${String(source_key)}`;
+      const occurrence = key_occurrences.get(key_base) || 0;
+      key_occurrences.set(key_base, occurrence + 1);
+      const height_key = `${key_base}:${occurrence}`;
+      active_height_keys.add(height_key);
+      let target_index = column_assignments.get(height_key);
+      if (!Number.isInteger(target_index) || target_index >= column_count) {
+        target_index = 0;
+        for (let column_index = 1; column_index < heights.length; column_index += 1) {
+          if (heights[column_index] < heights[target_index]) {
+            target_index = column_index;
+          }
+        }
+        column_assignments.set(height_key, target_index);
+      }
+      const estimated_height = measured_heights.get(height_key) ||
+        estimated_item_height(item, index);
+      const bucket = buckets[target_index];
+      if (bucket.length > 0) heights[target_index] += column_gap;
+      bucket.push({
+        item,
+        index,
+        source_key,
+        height_key,
+        estimated_height,
+        virtual_key: height_key,
+      });
+      heights[target_index] += estimated_height;
+    });
+
+    for (const height_key of column_assignments.keys()) {
+      if (!active_height_keys.has(height_key)) {
+        column_assignments.delete(height_key);
+        measured_heights.delete(height_key);
+      }
+    }
+
+    target_columns.forEach((column, index) => {
+      column.height = heights[index];
+      column.items_.as(buckets[index], { reset: true });
+    });
+  }
+
+  function schedule_distribute() {
+    if (distribute_frame) return;
+    distribute_frame = window.requestAnimationFrame(distribute);
+  }
+
+  function measure_viewport() {
+    if (!root) return;
+    const height = Math.max(1, Number(root.clientHeight) || 1);
+    if (viewport_height_.value !== height) viewport_height_.as(height);
+    const width = Math.max(0, Number(root.clientWidth) || 0);
+    if (Math.abs(root_width - width) >= 1) {
+      root_width = width;
+      schedule_distribute();
+    }
+  }
+
+  function mount_root(event) {
+    const next_root = waterfall_dom_element(event) ||
+      document.querySelector(`[data-dm-waterfall-id="${waterfall_id}"]`);
+    if (!next_root) return false;
+    if (root !== next_root) {
+      root?.removeEventListener("scroll", handle_scroll);
+      resize_observer?.disconnect();
+      if (resize_handler) window.removeEventListener("resize", resize_handler);
+      root = next_root;
+      root_width = 0;
+      root.addEventListener("scroll", handle_scroll, { passive: true });
+      resize_handler = null;
+      if (typeof ResizeObserver !== "undefined") {
+        resize_observer = new ResizeObserver(measure_viewport);
+        resize_observer.observe(root);
+      } else {
+        resize_handler = measure_viewport;
+        window.addEventListener("resize", resize_handler);
+      }
+    }
+    measure_viewport();
+    return true;
+  }
+
+  function schedule_fallback_mount() {
+    if (fallback_mount_timer || root || fallback_mount_attempts >= 10) return;
+    fallback_mount_attempts += 1;
+    fallback_mount_timer = window.setTimeout(() => {
+      fallback_mount_timer = 0;
+      if (!mount_root(null)) schedule_fallback_mount();
+    }, 0);
+  }
+
+  function handle_scroll(event) {
+    const target = waterfall_dom_element(event) || root;
+    if (!target) return;
+    const scroll_top = Math.max(0, Number(target.scrollTop) || 0);
+    scroll_top_.as(scroll_top);
+    const client_height = Math.max(1, Number(target.clientHeight) || 1);
+    if (viewport_height_.value !== client_height) {
+      viewport_height_.as(client_height);
+    }
+    const position = {
+      target,
+      scrollTop: scroll_top,
+      clientHeight: client_height,
+      scrollHeight: Math.max(0, Number(target.scrollHeight) || 0),
+    };
+    if (typeof onScroll === "function") onScroll(position);
+    if (typeof onReachBottom !== "function") return;
+    const threshold = Math.max(
+      0,
+      Number(source_value(reachBottomThreshold, 240)) || 0,
+    );
+    const near_bottom = position.scrollHeight > 0 &&
+      position.scrollTop + position.clientHeight >=
+        position.scrollHeight - threshold;
+    if (near_bottom && !reached_bottom) {
+      reached_bottom = true;
+      onReachBottom(position);
+    } else if (!near_bottom) {
+      reached_bottom = false;
+    }
+  }
+
+  if (is_source(each)) {
+    cleanups.push(each.subscribe({
+      onPatch: schedule_distribute,
+      onChange: schedule_distribute,
+    }));
+  }
+  [columns, minColumnWidth, maxColumns, gap, itemHeight].forEach((source) => {
+    const cleanup = subscribe_source(source, schedule_distribute);
+    if (cleanup) cleanups.push(cleanup);
+  });
+  distribute();
+  schedule_fallback_mount();
+
+  return View(
+    {
+      ...view_props,
+      class: class_names(["dm-waterfall", extra_class]),
+      style: {
+        "--dm-waterfall-gap": `${Math.max(0, Number(source_value(gap, 16)) || 0)}px`,
+        ...(extra_style || {}),
+      },
+      attributes: {
+        n: "waterfall",
+        "data-dm-waterfall-id": waterfall_id,
+        ...(extra_attributes || {}),
+      },
+      onMounted(event) {
+        if (!mount_root(event)) schedule_fallback_mount();
+        onMounted?.(event);
+      },
+      onUnmounted() {
+        if (distribute_frame) window.cancelAnimationFrame(distribute_frame);
+        if (fallback_mount_timer) window.clearTimeout(fallback_mount_timer);
+        root?.removeEventListener("scroll", handle_scroll);
+        resize_observer?.disconnect();
+        if (resize_handler) window.removeEventListener("resize", resize_handler);
+        cleanups.forEach((cleanup) => cleanup?.());
+        column_sources.forEach((source) => source.destroy?.());
+        measured_heights.clear();
+        column_assignments.clear();
+        column_records_.destroy?.();
+        scroll_top_.destroy?.();
+        viewport_height_.destroy?.();
+        column_width_.destroy?.();
+        root = null;
+        onUnmounted?.();
+      },
+    },
+    [
+      View(
+        {
+          class: "dm-waterfall__columns",
+          attributes: { n: "waterfall-columns" },
+        },
+        [
+          For({
+            key: "id",
+            each: column_records_,
+            render(column) {
+              return VirtualListView({
+                class: "dm-waterfall__column",
+                attributes: {
+                  n: "waterfall-column",
+                  "data-waterfall-column": String(column.index),
+                },
+                style: { overflow: "visible" },
+                each: column.items_,
+                key: "virtual_key",
+                size,
+                buffer,
+                gutter: gap,
+                itemHeight(entry) {
+                  return entry.estimated_height;
+                },
+                paddingBottom,
+                externalScroll: true,
+                scrollTop: scroll_top_,
+                viewportHeight: viewport_height_,
+                onItemResize(event) {
+                  const entry = event.item;
+                  if (!entry) return;
+                  measured_heights.set(entry.height_key, event.height);
+                  onItemResize?.({ ...event, item: entry.item });
+                },
+                render(entry_, index_) {
+                  const entry = source_value(entry_, {});
+                  return typeof render === "function"
+                    ? render(entry.item, index_, column.index)
+                    : null;
+                },
+              });
+            },
+          }),
+        ],
+      ),
+      footer === undefined || footer === null
+        ? null
+        : View(
+            {
+              class: "dm-waterfall__footer",
+              attributes: { n: "waterfall-footer" },
+            },
+            Array.isArray(footer) ? footer : [footer],
+          ),
+    ].filter(Boolean),
+  );
+}
+
 function table_source(value) {
   return Boolean(
     value &&
@@ -2427,7 +3158,7 @@ function table_keyed_item(entry, row_key) {
 }
 
 function table_item_value(item_) {
-  return item_ && item_.value !== undefined ? item_.value : item_;
+  return table_source(item_) ? item_.value : item_;
 }
 
 function table_resolve(value, ...args) {
@@ -2596,6 +3327,98 @@ function table_state_icon(value, fallback_name, fallback_size) {
     : icon;
 }
 
+function brand_state_size(size) {
+  if (size === undefined || size === null || size === "") return undefined;
+  return typeof size === "number" ? `${size}px` : size;
+}
+
+export function BrandLoading(props = {}) {
+  const size = brand_state_size(props.size);
+  const label = props.label || "加载中";
+  const decorative = Boolean(props.decorative);
+
+  return View(
+    {
+      class: class_names([
+        "dm-brand-loading",
+        props.labelVisible && "dm-brand-loading--with-label",
+        props.class,
+      ]),
+      style: {
+        ...(size ? { "--dm-brand-state-size": size } : {}),
+        ...(props.style || {}),
+      },
+      attributes: {
+        n: props.name || "brand-loading",
+        ...(decorative
+          ? { "aria-hidden": "true" }
+          : { role: "status", "aria-label": label }),
+        ...(props.attributes || {}),
+      },
+    },
+    [
+      View(
+        {
+          class: "dm-brand-loading__visual",
+          attributes: { "aria-hidden": "true" },
+        },
+        [
+          View({ class: "dm-brand-loading__symbol" }),
+        ],
+      ),
+      props.labelVisible
+        ? View({ class: "dm-brand-loading__label" }, [label])
+        : null,
+    ].filter(Boolean),
+  );
+}
+
+export function BrandEmpty(props = {}) {
+  const size = brand_state_size(props.size);
+
+  return View(
+    {
+      class: class_names(["dm-brand-empty", props.class]),
+      style: {
+        ...(size ? { "--dm-brand-state-size": size } : {}),
+        ...(props.style || {}),
+      },
+      attributes: {
+        n: props.name || "brand-empty",
+        "aria-hidden": "true",
+        ...(props.attributes || {}),
+      },
+    },
+    [
+      View({ class: "dm-brand-empty__well" }),
+      View({ class: "dm-brand-empty__symbol" }),
+    ],
+  );
+}
+
+export function BrandError(props = {}) {
+  const size = brand_state_size(props.size);
+
+  return View(
+    {
+      class: class_names(["dm-brand-error", props.class]),
+      style: {
+        ...(size ? { "--dm-brand-state-size": size } : {}),
+        ...(props.style || {}),
+      },
+      attributes: {
+        n: props.name || "brand-error",
+        "aria-hidden": "true",
+        ...(props.attributes || {}),
+      },
+    },
+    [
+      View({ class: "dm-brand-error__well" }),
+      View({ class: "dm-brand-error__symbol" }),
+    ],
+  );
+}
+
 function TableState(props) {
   const icon = table_resolve(props.icon);
   const title = table_resolve(props.title);
@@ -2677,7 +3500,10 @@ function TableEmpty(props) {
     state: "empty",
     class: props.emptyClass,
     attributes: props.emptyAttributes,
-    icon: table_state_icon(props.emptyIcon, "inbox", 36),
+    icon:
+      props.emptyIcon === undefined
+        ? BrandEmpty({ size: 132, name: `${props.name}-empty-symbol` })
+        : table_state_icon(props.emptyIcon, "inbox", 36),
     title: props.emptyTitle ?? "暂无数据",
     description: props.emptyDescription,
     descriptionSuffix: "description",
@@ -2695,12 +3521,15 @@ function TableError(props) {
   return TableState({
     name: props.name,
     state: "error",
-    class: props.errorClass,
+    class: static_classes(["dm-table-state--error", props.errorClass]),
     attributes: {
       role: "alert",
       ...(props.errorAttributes || {}),
     },
-    icon: table_state_icon(props.errorIcon, "circle-alert", 32),
+    icon:
+      props.errorIcon === undefined
+        ? BrandError({ size: 132, name: `${props.name}-error-symbol` })
+        : table_state_icon(props.errorIcon, "circle-alert", 32),
     title: props.errorTitle ?? "数据加载失败",
     description: props.errorMessage ?? props.error,
     descriptionSuffix: "message",
@@ -3188,12 +4017,10 @@ function TableLoadingOverlay(props) {
       },
     },
     [
-      View({
-        class: "dm-loading-logo",
-        attributes: {
-          n: `${props.name}-loading-watermark`,
-          "aria-hidden": "true",
-        },
+      BrandLoading({
+        size: 84,
+        name: `${props.name}-loading-watermark`,
+        decorative: true,
       }),
     ],
   );

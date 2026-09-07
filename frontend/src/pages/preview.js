@@ -1,20 +1,29 @@
 import { PreviewViewModel } from "./preview.model.js";
+import { BrandEmpty, BrandError, BrandLoading, Tag, PlatformTag } from "../dmui.js";
 
 function PreviewStateView(props) {
   return View(
     {
-      class: "preview-state dm-empty-state",
+      class: [
+        "preview-state dm-empty-state",
+        props.role === "alert" ? "is-error" : "",
+      ]
+        .filter(Boolean)
+        .join(" "),
       role: props.role || "status",
     },
     [
-      props.loading ? View({ class: "preview-spinner" }) : null,
+      props.loading
+        ? BrandLoading({
+            size: 88,
+            name: "preview-loading-symbol",
+            decorative: true,
+          })
+        : null,
       !props.loading
-        ? View({ class: "preview-state-icon" }, [
-            Timeless.Icon({
-              name: props.role === "alert" ? "circle-alert" : "file-search",
-              size: 22,
-            }),
-          ])
+        ? props.role === "alert"
+          ? BrandError({ size: 124, name: "preview-error-symbol" })
+          : BrandEmpty({ size: 124, name: "preview-empty-symbol" })
         : null,
       props.title
         ? View({ as: "h3", class: "preview-state-title" }, [props.title])
@@ -36,14 +45,11 @@ function PreviewHeaderView(props) {
     account
       ? View({ class: "preview-account" }, [
           account.avatar_url
-            ? Timeless.Img({
+            ? LazyImg({
                 class: "preview-account-avatar",
                 src: account.avatar_url,
                 alt: "",
                 attributes: { referrerpolicy: "no-referrer" },
-                onError(event) {
-                  event.target.style.display = "none";
-                },
               })
             : null,
           View({ class: "preview-account-name" }, [
@@ -57,30 +63,21 @@ function PreviewHeaderView(props) {
     ),
     View({ class: "preview-subtitle" }, [
       task.platform_id
-        ? View({ class: "preview-platform" }, [
-            task.platform_favicon
-              ? Timeless.Img({
-                  class: "preview-platform-icon",
-                  src: task.platform_favicon,
-                  alt: "",
-                  attributes: { referrerpolicy: "no-referrer" },
-                  onError(event) {
-                    event.target.style.display = "none";
-                  },
-                })
-              : null,
-            task.platform_name,
-          ])
+        ? PlatformTag({
+            name: "preview-platform",
+            favicon: task.platform_favicon,
+            label: task.platform_name,
+          })
         : null,
       task.content_type
-        ? View(
-            { class: "preview-badge dm-badge dm-badge--info" },
+        ? Tag(
+            { variant: "info", name: "preview-content-type" },
             [task.content_type],
           )
         : null,
       Number.isFinite(props.fileCount)
-        ? View(
-            { class: "preview-badge dm-badge dm-badge--info" },
+        ? Tag(
+            { variant: "info", name: "preview-file-count" },
             [`文件 (${props.fileCount})`],
           )
         : null,
@@ -92,6 +89,12 @@ function PreviewSingleFileView(props) {
   const vm$ = props.store;
   const file = props.file;
   const url = vm$.methods.fileURL(file);
+  if (vm$.methods.isHTMLFile(file)) {
+    return PreviewHTMLFileView({ store: vm$, file });
+  }
+  if (vm$.methods.isTextFile(file)) {
+    return PreviewTextFileView({ store: vm$, file });
+  }
   if (file.file_type === "video") {
     return View({ class: "preview-video-container" }, [
       PreviewVideoPlayerView({
@@ -104,7 +107,7 @@ function PreviewSingleFileView(props) {
     ]);
   }
   return View({ class: "preview-image-container" }, [
-    Timeless.Img({
+    LazyImg({
       class: "preview-image",
       src: url,
       alt: file.name,
@@ -113,10 +116,237 @@ function PreviewSingleFileView(props) {
   ]);
 }
 
+function PreviewHTMLFileView(props) {
+  const vm$ = props.store;
+  const file = props.file;
+  return View(
+    {
+      class: ["preview-html-reader", props.class].filter(Boolean).join(" "),
+      attributes: {
+        n: props.nodeName || "preview-html-reader",
+        role: "region",
+        "aria-label": `HTML 预览：${file.name}`,
+      },
+      onMounted() {
+        vm$.methods.mountHTMLReader(file);
+      },
+      onUnmounted() {
+        vm$.methods.unmountHTMLReader();
+      },
+    },
+    [
+      Timeless.RichText({
+        class: "preview-html-content",
+        content: vm$.state.html_content,
+        attributes: {
+          n: "preview-html-content",
+          "data-content-format": "html",
+          title: `HTML 预览：${file.name}`,
+        },
+      }),
+      Show({
+        when: vm$.state.html_loading,
+        ok() {
+          return PreviewStateView({
+            loading: true,
+            message: "正在加载 HTML…",
+          });
+        },
+      }),
+      Show({
+        when: computed(vm$.state.html_error, (error) => Boolean(error)),
+        ok() {
+          return PreviewStateView({
+            role: "alert",
+            message: vm$.state.html_error,
+            action: View(
+              {
+                as: "button",
+                class: "preview-retry dm-button dm-button--primary dm-focus-ring",
+                attributes: { type: "button" },
+                onClick() {
+                  vm$.methods.retryHTML();
+                },
+              },
+              ["重试"],
+            ),
+          });
+        },
+      }),
+    ],
+  );
+}
+
+function PreviewTextFileView(props) {
+  const vm$ = props.store;
+  const file = props.file;
+  const render_text_line = (line_) => {
+    const line =
+      line_ && line_.value !== undefined ? line_.value : line_;
+    return View(
+      {
+        class: "preview-text-line",
+        attributes: {
+          n: "preview-text-line",
+          "data-line": String(line.number),
+        },
+      },
+      [
+        View(
+          {
+            class: "preview-text-line-number",
+            attributes: {
+              n: "preview-text-line-number",
+              "aria-hidden": "true",
+            },
+          },
+          [String(line.number)],
+        ),
+        View(
+          {
+            class: "preview-text-line-content",
+            attributes: { n: "preview-text-line-content" },
+          },
+          [line.text],
+        ),
+      ],
+    );
+  };
+  return View(
+    {
+      class: ["preview-text-reader", props.class].filter(Boolean).join(" "),
+      attributes: {
+        n: props.nodeName || "preview-text-reader",
+        role: "region",
+        "aria-label": `文本预览：${file.name}`,
+      },
+    },
+    [
+      View(
+        {
+          class: "preview-text-toolbar",
+          attributes: { n: "preview-text-toolbar" },
+        },
+        [
+          View(
+            {
+              class: "preview-text-title",
+              attributes: { n: "preview-text-title", title: file.name },
+            },
+            [file.name],
+          ),
+          View(
+            {
+              class: "preview-text-count",
+              attributes: { n: "preview-text-count", "aria-live": "polite" },
+            },
+            [computed(vm$.state.text_lines, (lines) => `${lines.length} 行`)],
+          ),
+        ],
+      ),
+      Timeless.ui.ScrollViewPrimitive.Root(
+        {
+          store: vm$.methods.textScrollView(),
+          class: "preview-text-lines",
+          attributes: {
+            n: "preview-text-lines",
+            tabindex: "0",
+            "aria-label": "文本内容",
+          },
+          onMounted(event) {
+            vm$.methods.mountTextReader(event, file);
+          },
+          onUnmounted() {
+            vm$.methods.unmountTextReader();
+          },
+        },
+        [
+          VirtualListView({
+            class: "preview-text-list",
+            attributes: { n: "preview-text-list" },
+            style: { "min-height": "100%" },
+            each: vm$.state.text_lines,
+            key: "number",
+            size: 32,
+            buffer: 8,
+            itemHeight: 24,
+            externalScroll: true,
+            scrollTop: vm$.state.text_scroll_top,
+            viewportHeight: vm$.state.text_viewport_height,
+            render: render_text_line,
+          }),
+        ],
+      ),
+      Show({
+        when: vm$.state.text_loading,
+        ok() {
+          return View(
+            {
+              class: "preview-text-status",
+              attributes: { n: "preview-text-loading", role: "status" },
+            },
+            ["正在加载更多内容…"],
+          );
+        },
+      }),
+      Show({
+        when: computed(vm$.state.text_error, (error) => Boolean(error)),
+        ok() {
+          return View(
+            {
+              class: "preview-text-status preview-text-error",
+              attributes: { n: "preview-text-error", role: "alert" },
+            },
+            [
+              vm$.state.text_error,
+              View(
+                {
+                  as: "button",
+                  class: "preview-text-retry dm-button dm-focus-ring",
+                  attributes: {
+                    n: "preview-text-retry",
+                    type: "button",
+                  },
+                  onClick() {
+                    vm$.methods.retryText();
+                  },
+                },
+                ["重试"],
+              ),
+            ],
+          );
+        },
+      }),
+      Show({
+        when: computed(
+          vm$.state.text_has_more,
+          (has_more) =>
+            !has_more &&
+            vm$.state.text_lines.value.length > 0 &&
+            !vm$.state.text_error.value,
+        ),
+        ok() {
+          return View(
+            {
+              class: "preview-text-status preview-text-end",
+              attributes: { n: "preview-text-end", role: "status" },
+            },
+            ["已加载全部内容"],
+          );
+        },
+      }),
+    ],
+  );
+}
+
 function PreviewVideoPlayerView(props) {
   const vm$ = props.store;
   const file = props.file;
   const is_live_playback = vm$.methods.isLivePlayback(file);
+  const player$ = vm$.methods.createVideoPlayer(file, {
+    autoplay: Boolean(props.autoplay),
+  });
+  let unsubscribe_tracks = null;
   return View(
     {
       class: [
@@ -137,16 +367,44 @@ function PreviewVideoPlayerView(props) {
         preload: is_live_playback ? "none" : "metadata",
         attributes: { n: "preview-video-media" },
         onMounted(event) {
-          vm$.methods.mountVideo(event, file, {
-            autoplay: Boolean(props.autoplay),
+          unsubscribe_tracks?.();
+          const video = event.target.get$elm();
+          // Timeless 0.33 View always renders a div, so render native tracks here.
+          unsubscribe_tracks = player$.state.tracks.subscribe({
+            onChange(tracks) {
+              video.querySelectorAll('[data-n="preview-video-subtitle-track"]')
+                .forEach((track) => track.remove());
+              for (const track of tracks) {
+                const element = video.ownerDocument.createElement("track");
+                element.setAttribute("data-n", "preview-video-subtitle-track");
+                element.kind = "captions";
+                element.src = track.src;
+                element.label = track.label;
+                element.default = track.is_default;
+                video.appendChild(element);
+                player$.mountTrack(element, track);
+              }
+            },
           });
+          player$.mount(event);
         },
         onUnmounted() {
-          vm$.methods.unmountVideo(file);
+          player$.unmount();
+          unsubscribe_tracks?.();
+          unsubscribe_tracks = null;
+        },
+      }),
+      Show({
+        when: computed(player$.state.subtitle_error, Boolean),
+        ok() {
+          return Tag({
+            class: "preview-subtitle-error",
+            attributes: { n: "preview-video-subtitle-error", role: "status" },
+          }, [player$.state.subtitle_error]);
         },
       }),
       is_live_playback
-        ? View(
+        ? Tag(
             {
               class: computed(
                 vm$.state.live_playback_status,
@@ -195,14 +453,11 @@ function PreviewFileThumbnail(props) {
         }),
       ],
     ),
-    Timeless.Img({
+    LazyImg({
       class: "preview-file-thumbnail",
       src: vm$.methods.fileURL(file),
       alt: file.name,
       attributes: { loading: "lazy" },
-      onError(event) {
-        event.target.style.display = "none";
-      },
     }),
   ]);
 }
@@ -233,7 +488,7 @@ function PreviewFileCardView(props) {
       View({ class: "preview-file-thumb" }, [
         PreviewFileThumbnail({ store: vm$, file }),
         file.status
-          ? View({ class: "preview-file-status" }, [file.status])
+          ? Tag({ name: "preview-file-status", class: "preview-file-status" }, [file.status])
           : null,
       ].filter(Boolean)),
       View({ class: "preview-file-info" }, [
@@ -321,6 +576,22 @@ function PreviewGalleryMediaView(props) {
   if (!vm$.methods.filePlayable(file)) {
     return PreviewGalleryPlaceholderView({ store: vm$, file });
   }
+  if (vm$.methods.isHTMLFile(file)) {
+    return PreviewHTMLFileView({
+      store: vm$,
+      file,
+      class: "preview-gallery-html-reader",
+      nodeName: "gallery-html-reader",
+    });
+  }
+  if (vm$.methods.isTextFile(file)) {
+    return PreviewTextFileView({
+      store: vm$,
+      file,
+      class: "preview-gallery-text-reader",
+      nodeName: "gallery-text-reader",
+    });
+  }
   if (file.file_type === "image") {
     return Timeless.Img({
       class: "preview-gallery-image",
@@ -359,16 +630,13 @@ function PreviewGalleryMediaView(props) {
       }),
     ]);
   }
-  if (["html", "pdf"].includes(file.file_type)) {
+  if (file.file_type === "pdf") {
     return Timeless.Webview({
       class: "preview-gallery-document",
       href: url,
       attributes: {
         title: file.name,
         loading: "eager",
-        ...(file.file_type === "html"
-          ? { sandbox: "allow-same-origin" }
-          : {}),
       },
     });
   }
@@ -574,7 +842,10 @@ function PreviewTaskBodyView(props) {
   const single_file = existing_files.length === 1 ? existing_files[0] : null;
   return [
     PreviewHeaderView({ task }),
-    single_file && ["video", "image"].includes(single_file.file_type)
+    single_file &&
+    (vm$.methods.isHTMLFile(single_file) ||
+      vm$.methods.isTextFile(single_file) ||
+      ["video", "image"].includes(single_file.file_type))
       ? PreviewSingleFileView({ store: vm$, file: single_file })
       : PreviewFileGridView({ store: vm$, files: task.files }),
   ];
@@ -674,6 +945,22 @@ function PreviewOverlayMediaView(props) {
   const vm$ = props.store;
   const file = props.file;
   const url = vm$.methods.fileURL(file);
+  if (vm$.methods.isHTMLFile(file)) {
+    return PreviewHTMLFileView({
+      store: vm$,
+      file,
+      class: "preview-overlay-html-reader",
+      nodeName: "overlay-html-reader",
+    });
+  }
+  if (vm$.methods.isTextFile(file)) {
+    return PreviewTextFileView({
+      store: vm$,
+      file,
+      class: "preview-overlay-text-reader",
+      nodeName: "overlay-text-reader",
+    });
+  }
   if (file.file_type === "image") {
     return Timeless.Img({
       class: "preview-overlay-image",
@@ -697,15 +984,12 @@ function PreviewOverlayMediaView(props) {
       autoplay: true,
     });
   }
-  if (["html", "pdf"].includes(file.file_type)) {
+  if (file.file_type === "pdf") {
     return Timeless.Webview({
       class: "preview-overlay-frame",
       href: url,
       attributes: {
         title: file.name,
-        ...(file.file_type === "html"
-          ? { sandbox: "allow-same-origin" }
-          : {}),
       },
     });
   }
@@ -760,12 +1044,7 @@ function PreviewOverlayView(props) {
 function PreviewPageView(props) {
   const vm$ = PreviewViewModel(props);
   let unsubscribe_task_id = null;
-
-  function handle_keydown(event) {
-    if (event.key === "Escape") {
-      vm$.methods.closePreview();
-    }
-  }
+  let unsubscribe_escape = null;
 
   return View(
     {
@@ -773,7 +1052,9 @@ function PreviewPageView(props) {
         .filter(Boolean)
         .join(" "),
       onMounted() {
-        window.document.addEventListener("keydown", handle_keydown);
+        unsubscribe_escape = props.app.onEscapeKeyDown(
+          vm$.methods.closePreview,
+        );
         if (props.taskId && typeof props.taskId.subscribe === "function") {
           unsubscribe_task_id = props.taskId.subscribe({
             onChange(task_id) {
@@ -784,7 +1065,10 @@ function PreviewPageView(props) {
         vm$.methods.ready();
       },
       onUnmounted() {
-        window.document.removeEventListener("keydown", handle_keydown);
+        if (typeof unsubscribe_escape === "function") {
+          unsubscribe_escape();
+          unsubscribe_escape = null;
+        }
         if (typeof unsubscribe_task_id === "function") {
           unsubscribe_task_id();
           unsubscribe_task_id = null;
@@ -848,4 +1132,5 @@ function PreviewPageView(props) {
   );
 }
 
+export { PreviewGalleryMediaView };
 export default PreviewPageView;

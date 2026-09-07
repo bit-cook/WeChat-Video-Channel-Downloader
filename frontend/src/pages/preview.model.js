@@ -26,6 +26,148 @@ function error_message(error, fallback) {
   return error ? String(error) : fallback;
 }
 
+const text_preview_chunk_bytes = 64 * 1024;
+const text_preview_scroll_threshold = 320;
+
+function html_preview_content(content) {
+  const document_ = new DOMParser().parseFromString(content, "text/html");
+  const styles = [...document_.querySelectorAll("style")].map((element) => {
+    const sheet = new CSSStyleSheet();
+    sheet.replaceSync(element.textContent);
+    const css = html_preview_rules(sheet.cssRules);
+    return element.media ? `@media ${element.media} { ${css} }` : css;
+  });
+  document_.querySelectorAll("style, link, base, meta, title, script")
+    .forEach((element) => element.remove());
+  const root = document_.createElement("div");
+  const body = document_.createElement("div");
+  for (const [source, target, name] of [
+    [document_.documentElement, root, "preview-html-document"],
+    [document_.body, body, "preview-html-body"],
+  ]) {
+    for (const attribute of source.attributes) {
+      target.setAttribute(attribute.name, attribute.value);
+    }
+    target.classList.add(name);
+    target.setAttribute("data-n", name);
+  }
+  const style = document_.createElement("style");
+  style.setAttribute("data-n", "preview-html-scoped-styles");
+  style.textContent = `@scope { ${styles.join("\n")} }`;
+  body.append(...document_.body.childNodes);
+  root.append(style, body);
+  return root.outerHTML;
+}
+
+function html_preview_rules(rules) {
+  return [...rules].map((rule) => {
+    if (rule.type === CSSRule.STYLE_RULE) {
+      // Preserve quoted/attribute values while mapping document roots to wrappers.
+      rule.selectorText = rule.selectorText.replace(
+        /\[(?:"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|\\.|[^\]\\])*\]|"(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*'|(^|[\s>+~,(])(html|body|:root)(?=[\s.#:[>+~),]|$)/g,
+        (match, prefix, root) => root
+          ? `${prefix}${root === "body" ? ".preview-html-body" : ":scope"}`
+          : match,
+      );
+      return `${rule.selectorText} { ${rule.style.cssText} ${html_preview_rules(rule.cssRules || [])} }`;
+    }
+    if (rule.cssRules && /^@(media|supports|container|layer|scope|starting-style)\b/.test(rule.cssText)) {
+      const header = rule.cssText.slice(0, rule.cssText.indexOf("{"));
+      return `${header} { ${html_preview_rules(rule.cssRules)} }`;
+    }
+    // Document-wide rules such as @font-face and @page must not escape the preview.
+    return "";
+  }).join("\n");
+}
+
+function normalized_content_type(value) {
+  return String(prop_value(value) || "")
+    .split(";", 1)[0]
+    .trim()
+    .toLowerCase();
+}
+
+function normalized_file_type(source) {
+  const file_type = normalized_content_type(
+    first_non_empty(source.file_type, source.fileType, source.FileType),
+  );
+  if (file_type && file_type !== "other") {
+    return file_type;
+  }
+  const content_type = normalized_content_type(
+    first_non_empty(
+      source.mime_type,
+      source.mimeType,
+      source.MIMEType,
+      source.kind,
+      source.Kind,
+      source.type,
+      source.Type,
+    ),
+  );
+  if (content_type.startsWith("audio/")) {
+    return "audio";
+  }
+  const is_m4a = [
+    source.name,
+    source.Name,
+    source.local_path,
+    source.localPath,
+    source.LocalPath,
+  ].some((value) => /\.m4a$/i.test(String(prop_value(value) || "").trim()));
+  return is_m4a ? "audio" : file_type || "other";
+}
+
+function is_html_file(file) {
+  if (!file) {
+    return false;
+  }
+  const has_html_type = [
+    file.file_type,
+    file.kind,
+    file.type,
+    file.mime_type,
+    file.mimeType,
+  ].some((value) =>
+    ["html", "text/html", "application/xhtml+xml"].includes(
+      normalized_content_type(value),
+    ),
+  );
+  if (has_html_type) {
+    return true;
+  }
+  return [file.name, file.local_path, file.localPath].some((value) =>
+    /\.(?:html?|xhtml)$/i.test(String(prop_value(value) || "").trim()),
+  );
+}
+
+function is_text_file(file) {
+  if (!file || is_html_file(file)) {
+    return false;
+  }
+  return [
+    file.file_type,
+    file.kind,
+    file.type,
+    file.mime_type,
+    file.mimeType,
+  ].some((value) => {
+    const content_type = normalized_content_type(value);
+    return (
+      content_type === "text" ||
+      content_type.startsWith("text/") ||
+      [
+        "application/json",
+        "application/javascript",
+        "application/x-javascript",
+        "application/xml",
+        "application/yaml",
+        "application/x-yaml",
+      ].includes(content_type)
+    );
+  });
+}
+
 function platform_favicon(platform_id) {
   const key = String(platform_id || "")
     .trim()
@@ -78,6 +220,71 @@ function playback_url(file) {
   return new URL(file.playback_url, window.API_ORIGIN).href;
 }
 
+function subtitle_format(file) {
+  const extension = String(file.name || file.local_path || "")
+    .match(/\.(vtt|srt|ass|ssa)$/i)?.[1]?.toLowerCase();
+  if (extension) return extension;
+  const formats = {
+    "text/vtt": "vtt",
+    "application/x-subrip": "srt",
+    "text/srt": "srt",
+    "text/x-ssa": "ssa",
+    "text/x-ass": "ass",
+  };
+  return formats[normalized_content_type(file.kind || file.mime_type)] || "";
+}
+
+function subtitle_to_vtt(content, format) {
+  const text = content.replace(/^\uFEFF/, "").replace(/\r\n?/g, "\n").trim();
+  if (format === "vtt") {
+    if (!/^WEBVTT(?:[ \t\n]|$)/.test(text)) {
+      throw new Error("无效的 WebVTT 字幕");
+    }
+    return text + "\n";
+  }
+  const timestamp = (value) => {
+    const match = value.trim().match(/^(\d+):(\d{2}):(\d{2})[.,](\d{1,3})$/);
+    if (!match || Number(match[2]) > 59 || Number(match[3]) > 59) {
+      throw new Error("无效的字幕时间");
+    }
+    return `${match[1].padStart(2, "0")}:${match[2]}:${match[3]}.${match[4].padEnd(3, "0")}`;
+  };
+  let cues;
+  if (format === "srt") {
+    cues = text.split(/\n[ \t]*\n/).map((block) => {
+      const lines = block.split("\n");
+      if (/^\d+$/.test(lines[0].trim())) lines.shift();
+      const times = lines.shift().trim().split(/\s*-->\s*/);
+      if (times.length !== 2 || !lines.length) throw new Error("无效的 SRT 字幕");
+      return `${timestamp(times[0])} --> ${timestamp(times[1])}\n${lines.join("\n")}`;
+    });
+  } else if (format === "ass" || format === "ssa") {
+    let in_events = false;
+    let fields = ["layer", "start", "end", "style", "name", "marginl", "marginr", "marginv", "effect", "text"];
+    cues = [];
+    for (const line of text.split("\n")) {
+      if (/^\[.*\]$/.test(line.trim())) in_events = /^\[Events\]$/i.test(line.trim());
+      if (!in_events) continue;
+      if (/^Format:/i.test(line)) {
+        fields = line.slice(7).split(",").map((field) => field.trim().toLowerCase());
+      }
+      if (!/^Dialogue:/i.test(line)) continue;
+      const values = line.slice(9).split(",");
+      const text_index = fields.indexOf("text");
+      if (text_index !== fields.length - 1 || values.length < fields.length) {
+        throw new Error("无效的 ASS 字幕");
+      }
+      // ponytail: ASS styles/positioning are discarded; use an ASS renderer if exact styling is needed.
+      const body = values.slice(text_index).join(",").replace(/\{[^}]*\}/g, "")
+        .replace(/\\[Nn]/g, "\n").replace(/\\h/g, "\u00a0")
+        .replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+      cues.push(`${timestamp(values[fields.indexOf("start")] || "")} --> ${timestamp(values[fields.indexOf("end")] || "")}\n${body}`);
+    }
+  }
+  if (!cues?.length) throw new Error("字幕内容为空或格式不受支持");
+  return `WEBVTT\n\n${cues.join("\n\n")}\n`;
+}
+
 function should_use_stream_playback(file) {
   return Boolean(
     file &&
@@ -86,27 +293,40 @@ function should_use_stream_playback(file) {
   );
 }
 
-function mounted_media_element(event) {
-  let target = event && event.target ? event.target : event;
-  for (let depth = 0; depth < 4; depth += 1) {
-    if (
-      target &&
-      target.nodeType === 1 &&
-      typeof target.addEventListener === "function"
-    ) {
-      return target;
-    }
-    if (target && typeof target.get$elm === "function") {
-      target = target.get$elm();
-      continue;
-    }
-    if (target && target.$elm) {
-      target = target.$elm;
-      continue;
-    }
-    break;
+function live_playback_message(state, file) {
+  const paused = file && file.status === "paused";
+  switch (state.reason) {
+    case "waiting-source":
+      return paused
+        ? "尚无已完成分片；恢复录制后会自动开始播放。"
+        : "正在等待首个直播分片…";
+    case "source-missing":
+      return "录制已结束，但没有生成可播放的直播分片。";
+    case "source-loading":
+      return "正在载入已录制内容…";
+    case "source-ready":
+      return paused ? "已载入已有录制内容" : "已载入已录制内容";
+    case "playing":
+      return paused ? "正在播放已录制内容" : "边录边播";
+    case "buffering":
+      return paused
+        ? "录制已中断；已播放到现有内容末尾。"
+        : "正在缓冲直播分片…";
+    case "network-retry":
+      return "播放连接中断，正在重试…";
+    case "media-recovery":
+      return "媒体解码异常，正在恢复…";
+    case "unsupported":
+      return "当前宿主不支持 HLS 直播回看。";
+    case "invalid-target":
+      return "播放器宿主不可用。";
+    case "invalid-source":
+      return "缺少直播播放地址。";
+    case "playback-error":
+      return "无法播放当前直播编码。";
+    default:
+      return "";
   }
-  return null;
 }
 
 function normalize_account(raw) {
@@ -138,6 +358,13 @@ function normalize_file(raw) {
       source.LocalPath,
     ),
     file_url: first_non_empty(source.file_url, source.fileUrl, source.FileURL),
+    kind: first_non_empty(source.kind, source.Kind),
+    type: first_non_empty(source.type, source.Type),
+    mime_type: first_non_empty(
+      source.mime_type,
+      source.mimeType,
+      source.MIMEType,
+    ),
     playback_url: first_non_empty(
       source.playback_url,
       source.playbackUrl,
@@ -148,12 +375,7 @@ function normalize_file(raw) {
         ? source.playback_available
         : source.playbackAvailable || source.PlaybackAvailable,
     ),
-    file_type: first_non_empty(
-      source.file_type,
-      source.fileType,
-      source.FileType,
-      "other",
-    ),
+    file_type: normalized_file_type(source),
     status: first_non_empty(source.status, source.Status),
     size: Math.max(0, number_or_default(source.size || source.Size, 0)),
     progress: Math.min(
@@ -221,6 +443,8 @@ function normalize_zip_images(data) {
 }
 
 function PreviewViewModel(props) {
+  const platform = Timeless.getPlatform();
+  const hls_player$ = props.hlsPlayer;
   const task_ = ref(null);
   const loading_ = ref(false);
   const error_ = ref("");
@@ -229,18 +453,62 @@ function PreviewViewModel(props) {
   const zip_images_ = refarr([]);
   const zip_loading_ = ref(false);
   const zip_error_ = ref("");
+  const html_content_ = ref("");
+  const html_loading_ = ref(false);
+  const html_error_ = ref("");
+  const text_lines_ = refarr([]);
+  const text_loading_ = ref(false);
+  const text_error_ = ref("");
+  const text_has_more_ = ref(false);
+  const text_scroll_top_ = ref(0);
+  const text_viewport_height_ = ref(1);
   const live_playback_status_ = ref("idle");
   const live_playback_message_ = ref("");
   let detail_request_sequence = 0;
   let zip_request_sequence = 0;
   let detail_task_id = "";
-  let live_mount_sequence = 0;
-  let live_player = null;
-  let live_video = null;
-  let live_file_id = null;
-  let live_poll_timer = null;
-  let live_poll_controller = null;
-  let live_video_cleanup = null;
+  let live_file = null;
+  let html_reader_file = null;
+  let html_reader_sequence = 0;
+  let html_reader_abort_controller = null;
+  let text_reader_file = null;
+  let text_reader_sequence = 0;
+  let text_reader_offset = 0;
+  let text_reader_line_number = 1;
+  let text_reader_remainder = "";
+  let text_reader_decoder = null;
+  let text_reader_total = 0;
+  let text_reader_abort_controller = null;
+  const video_players = new Set();
+
+  function handle_text_scroll(value) {
+    const target = event_target_element(value);
+    const scroll_top = Number(value?.scrollTop ?? target?.scrollTop) || 0;
+    const client_height = Number(value?.clientHeight ?? target?.clientHeight) || 0;
+    const scroll_height = Number(value?.scrollHeight ?? target?.scrollHeight) || 0;
+    text_scroll_top_.as(scroll_top);
+    if (client_height > 0) {
+      text_viewport_height_.as(client_height);
+    }
+    if (
+      text_reader_file &&
+      text_has_more_.value &&
+      scroll_height > 0 &&
+      scroll_top + client_height >=
+        scroll_height - text_preview_scroll_threshold
+    ) {
+      load_text_more(text_reader_file);
+    }
+  }
+
+  const text_scroll_view$ = new Timeless.vm.ScrollViewCore({
+    onScroll: handle_text_scroll,
+  });
+
+  const unlisten_hls_player = hls_player$.onStateChange((state) => {
+    live_playback_status_.as(state.status);
+    live_playback_message_.as(live_playback_message(state, live_file));
+  });
 
   function is_live_playback(file) {
     return Boolean(file && playback_url(file) && !file.exists);
@@ -250,247 +518,357 @@ function PreviewViewModel(props) {
     return Boolean(file && (file.exists || playback_url(file)));
   }
 
-  function clear_live_poll() {
-    if (live_poll_timer !== null) {
-      window.clearTimeout(live_poll_timer);
-      live_poll_timer = null;
+  function destroy_live_player() {
+    hls_player$.unmount();
+    live_file = null;
+  }
+
+  function mount_video(target, file, options) {
+    if (!should_use_stream_playback(file)) {
+      destroy_live_player();
+      return null;
     }
-    if (live_poll_controller) {
-      live_poll_controller.abort();
-      live_poll_controller = null;
+    live_file = file;
+    return hls_player$.mount(target, {
+      url: playback_url(file),
+      autoplay: Boolean(options && options.autoplay),
+      terminal: ["error", "cancelled"].includes(file.status),
+    });
+  }
+
+  function unmount_video(session) {
+    if (!hls_player$.unmount(session)) return false;
+    live_file = null;
+    return true;
+  }
+
+  function create_video_player(file, options) {
+    const tracks = refarr([]);
+    const subtitle_error = ref("");
+    let controller = null;
+    let session = null;
+    const player = {
+      state: { tracks, subtitle_error },
+      async mount(event) {
+        player.unmount();
+        video_players.add(player);
+        session = mount_video(event, file, options);
+        const request = new AbortController();
+        controller = request;
+        const files = (task_.value?.files || []).filter(
+          (candidate) => candidate.exists && subtitle_format(candidate),
+        );
+        const results = await Promise.all(files.map(async (subtitle) => {
+          try {
+            const response = await window.fetch(file_url(subtitle), { signal: request.signal });
+            if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            const content = subtitle_to_vtt(await response.text(), subtitle_format(subtitle));
+            return { label: subtitle.name, content };
+          } catch (error) {
+            if (!request.signal.aborted) {
+              subtitle_error.as(`字幕加载失败：${subtitle.name}（${error_message(error, "读取失败")}）`);
+            }
+            return null;
+          }
+        }));
+        if (request.signal.aborted) return;
+        tracks.as(results.filter(Boolean).map((result, index) => ({
+          label: result.label,
+          src: URL.createObjectURL(new Blob([result.content], { type: "text/vtt" })),
+          is_default: index === 0,
+        })), { reset: true });
+      },
+      mountTrack(event, track) {
+        const element = event_target_element(event);
+        if (!element || !controller || controller.signal.aborted) return;
+        const signal = controller.signal;
+        const center_cues = () => {
+          if (signal.aborted || !element.isConnected) return;
+          for (const cue of element.track?.cues || []) {
+            cue.align = "center";
+            cue.position = 50;
+            cue.positionAlign = "center";
+          }
+        };
+        element.addEventListener("load", center_cues, { signal });
+        center_cues();
+        const apply_mode = () => {
+          if (!signal.aborted && element.isConnected && element.track) {
+            element.track.mode = track.is_default ? "showing" : "disabled";
+          }
+        };
+        apply_mode();
+        // The browser also selects tracks in a queued task after insertion.
+        setTimeout(apply_mode, 0);
+        element.addEventListener("error", () => {
+          if (!element.isConnected) return;
+          subtitle_error.as(`字幕加载失败：${track.label}`);
+        }, { signal });
+      },
+      unmount() {
+        controller?.abort();
+        controller = null;
+        const previous_tracks = tracks.value;
+        tracks.as([], { reset: true });
+        previous_tracks.forEach((track) => URL.revokeObjectURL(track.src));
+        subtitle_error.as("");
+        if (session !== null) unmount_video(session);
+        session = null;
+        video_players.delete(player);
+      },
+    };
+    return player;
+  }
+
+  function event_target_element(event) {
+    let target = event && event.target ? event.target : event;
+    for (let depth = 0; depth < 4; depth += 1) {
+      if (
+        target &&
+        target.nodeType === 1 &&
+        typeof target.addEventListener === "function"
+      ) {
+        return target;
+      }
+      if (target && typeof target.get$elm === "function") {
+        target = target.get$elm();
+        continue;
+      }
+      if (target && target.$elm) {
+        target = target.$elm;
+        continue;
+      }
+      break;
+    }
+    return null;
+  }
+
+  function reset_text_reader(file) {
+    text_reader_sequence += 1;
+    if (text_reader_abort_controller) {
+      text_reader_abort_controller.abort();
+      text_reader_abort_controller = null;
+    }
+    text_reader_file = file;
+    text_reader_offset = 0;
+    text_reader_line_number = 1;
+    text_reader_remainder = "";
+    text_reader_decoder = new TextDecoder("utf-8");
+    text_reader_total = Math.max(0, Number(file && file.size) || 0);
+    text_scroll_top_.as(0);
+    text_viewport_height_.as(1);
+    text_lines_.as([], { reset: true });
+    text_loading_.as(false);
+    text_error_.as("");
+    text_has_more_.as(Boolean(file && file_playable(file)));
+  }
+
+  function append_text_lines(text, is_final) {
+    const pieces = (text_reader_remainder + text).split("\n");
+    text_reader_remainder = is_final ? "" : pieces.pop() || "";
+    if (is_final && pieces[pieces.length - 1] === "") {
+      pieces.pop();
+    }
+    const lines = pieces.map((line) => ({
+      number: text_reader_line_number++,
+      text: line.endsWith("\r") ? line.slice(0, -1) : line,
+    }));
+    if (lines.length > 0) {
+      text_lines_.as([...text_lines_.value, ...lines], { reset: true });
     }
   }
 
-  function destroy_live_player(reset_status = true) {
-    live_mount_sequence += 1;
-    clear_live_poll();
-    if (typeof live_video_cleanup === "function") {
-      live_video_cleanup();
-      live_video_cleanup = null;
+  async function read_response_bytes(response, maximum_bytes) {
+    if (!response.body || typeof response.body.getReader !== "function") {
+      return {
+        bytes: new Uint8Array(await response.arrayBuffer()),
+        ended: true,
+      };
     }
-    if (live_player && typeof live_player.destroy === "function") {
-      live_player.destroy();
+    const reader = response.body.getReader();
+    const chunks = [];
+    let byte_count = 0;
+    let ended = false;
+    while (byte_count < maximum_bytes) {
+      const result = await reader.read();
+      if (result.done) {
+        ended = true;
+        break;
+      }
+      const bytes = result.value || new Uint8Array();
+      const remaining = maximum_bytes - byte_count;
+      const chunk = bytes.byteLength > remaining ? bytes.slice(0, remaining) : bytes;
+      chunks.push(chunk);
+      byte_count += chunk.byteLength;
+      if (chunk.byteLength < bytes.byteLength) {
+        await reader.cancel();
+        break;
+      }
     }
-    live_player = null;
-    if (live_video && live_video.dataset.livePlaybackUrl) {
-      live_video.removeAttribute("src");
-      live_video.load();
-    }
-    live_video = null;
-    live_file_id = null;
-    if (reset_status) {
-      live_playback_status_.as("idle");
-      live_playback_message_.as("");
-    }
+    const bytes = new Uint8Array(byte_count);
+    let offset = 0;
+    chunks.forEach((chunk) => {
+      bytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    });
+    return { bytes, ended };
   }
 
-  function set_live_playback_state(status, message) {
-    live_playback_status_.as(status);
-    live_playback_message_.as(message || "");
-  }
-
-  function schedule_live_playlist_probe(sequence, file, options) {
-    if (sequence !== live_mount_sequence || !live_video) {
-      return;
+  async function load_text_more(file) {
+    if (
+      !file ||
+      text_reader_file !== file ||
+      text_loading_.value ||
+      !text_has_more_.value
+    ) {
+      return null;
     }
-    live_poll_timer = window.setTimeout(() => {
-      live_poll_timer = null;
-      probe_live_playlist(sequence, file, options);
-    }, 1000);
-  }
-
-  async function probe_live_playlist(sequence, file, options) {
-    if (sequence !== live_mount_sequence || !live_video) {
-      return;
-    }
-    const url = playback_url(file);
-    const poll_controller = new AbortController();
-    live_poll_controller = poll_controller;
-    let response = null;
+    const sequence = text_reader_sequence;
+    const start = text_reader_offset;
+    const end = start + text_preview_chunk_bytes - 1;
+    const abort_controller = new AbortController();
+    text_reader_abort_controller = abort_controller;
+    text_loading_.as(true);
+    text_error_.as("");
     try {
-      response = await window.fetch(url, {
-        method: "HEAD",
-        cache: "no-store",
-        credentials: "same-origin",
-        signal: poll_controller.signal,
+      const response = await window.fetch(file_url(file), {
+        headers: {
+          Accept: "text/plain, application/json, text/*;q=0.9, */*;q=0.1",
+          Range: `bytes=${start}-${end}`,
+        },
+        signal: abort_controller.signal,
       });
+      if (!response.ok) {
+        throw new Error(`读取文本失败（HTTP ${response.status}）`);
+      }
+      if (response.status !== 206 && start > 0) {
+        throw new Error("文件服务不支持文本分段读取");
+      }
+      const content_range = String(response.headers.get("content-range") || "").match(
+        /^bytes\s+(\d+)-(\d+)\/(\d+|\*)$/i,
+      );
+      if (content_range && Number(content_range[1]) !== start) {
+        throw new Error("文本分段位置异常");
+      }
+      const response_total = content_range && content_range[3] !== "*"
+        ? Number(content_range[3])
+        : 0;
+      if (response.status !== 206 && response_total > text_preview_chunk_bytes) {
+        throw new Error("文件服务不支持文本分段读取");
+      }
+      if (response_total > 0) {
+        text_reader_total = response_total;
+      }
+      const result = await read_response_bytes(response, text_preview_chunk_bytes);
+      if (sequence !== text_reader_sequence || text_reader_file !== file) {
+        return null;
+      }
+      text_reader_offset = start + result.bytes.byteLength;
+      const is_final =
+        result.ended ||
+        (text_reader_total > 0 && text_reader_offset >= text_reader_total);
+      append_text_lines(text_reader_decoder.decode(result.bytes, { stream: !is_final }), false);
+      if (is_final) {
+        append_text_lines(text_reader_decoder.decode(), true);
+      }
+      text_has_more_.as(!is_final);
+      return result;
     } catch (error) {
       if (error && error.name === "AbortError") {
-        return;
+        return null;
       }
+      if (sequence === text_reader_sequence && text_reader_file === file) {
+        text_error_.as(error_message(error, "读取文本失败"));
+        text_has_more_.as(false);
+      }
+      return null;
     } finally {
-      if (live_poll_controller === poll_controller) {
-        live_poll_controller = null;
+      if (sequence === text_reader_sequence) {
+        text_loading_.as(false);
+        text_reader_abort_controller = null;
       }
-    }
-    if (sequence !== live_mount_sequence || !live_video) {
-      return;
-    }
-    if (response && response.ok) {
-      start_live_player(sequence, file, options);
-      return;
-    }
-    const terminal_status = ["error", "cancelled"].includes(file.status);
-    set_live_playback_state(
-      terminal_status ? "error" : "waiting",
-      terminal_status
-        ? "录制已结束，但没有生成可播放的直播分片。"
-        : file.status === "paused"
-          ? "尚无已完成分片；恢复录制后会自动开始播放。"
-          : "正在等待首个直播分片…",
-    );
-    if (!terminal_status) {
-      schedule_live_playlist_probe(sequence, file, options);
     }
   }
 
-  function start_live_player(sequence, file, options) {
-    if (sequence !== live_mount_sequence || !live_video) {
-      return;
+  function unmount_text_reader() {
+    text_reader_sequence += 1;
+    if (text_reader_abort_controller) {
+      text_reader_abort_controller.abort();
+      text_reader_abort_controller = null;
     }
-    const video = live_video;
-    const url = playback_url(file);
-    const autoplay = Boolean(options && options.autoplay);
-    video.dataset.livePlaybackUrl = url;
-    set_live_playback_state("loading", "正在载入已录制内容…");
-
-    const handle_playing = () => {
-      if (sequence === live_mount_sequence) {
-        set_live_playback_state(
-          "playing",
-          file.status === "paused" ? "正在播放已录制内容" : "边录边播",
-        );
-      }
-    };
-    const handle_waiting = () => {
-      if (sequence === live_mount_sequence) {
-        set_live_playback_state(
-          "loading",
-          file.status === "paused"
-            ? "录制已中断；已播放到现有内容末尾。"
-            : "正在缓冲直播分片…",
-        );
-      }
-    };
-    video.addEventListener("playing", handle_playing);
-    video.addEventListener("waiting", handle_waiting);
-    live_video_cleanup = () => {
-      video.removeEventListener("playing", handle_playing);
-      video.removeEventListener("waiting", handle_waiting);
-    };
-
-    const Hls = window.Hls;
-    const hls_supported = Boolean(
-      Hls && typeof Hls.isSupported === "function" && Hls.isSupported(),
-    );
-    if (
-      !hls_supported &&
-      video.canPlayType("application/vnd.apple.mpegurl")
-    ) {
-      const handle_native_loaded_metadata = () => {
-        if (sequence !== live_mount_sequence || video.seekable.length === 0) {
-          return;
-        }
-        try {
-          video.currentTime = video.seekable.start(0);
-        } catch {
-          // Safari may update its seekable window between the length and start
-          // calls. Playback can still proceed from its native default position.
-        }
-      };
-      const handle_native_error = () => {
-        if (sequence === live_mount_sequence) {
-          set_live_playback_state("error", "无法播放当前直播编码。");
-        }
-      };
-      const remove_common_listeners = live_video_cleanup;
-      video.addEventListener("loadedmetadata", handle_native_loaded_metadata);
-      video.addEventListener("error", handle_native_error);
-      live_video_cleanup = () => {
-        remove_common_listeners();
-        video.removeEventListener(
-          "loadedmetadata",
-          handle_native_loaded_metadata,
-        );
-        video.removeEventListener("error", handle_native_error);
-      };
-      video.src = url;
-      video.load();
-      if (autoplay) {
-        video.play().catch(() => {});
-      }
-      return;
-    }
-
-    if (!hls_supported) {
-      set_live_playback_state("error", "当前浏览器不支持 HLS/MSE 直播回看。");
-      return;
-    }
-
-    const player = new Hls({
-      startPosition: 0,
-      liveDurationInfinity: true,
-      maxBufferLength: 60,
-      backBufferLength: 600,
-    });
-    live_player = player;
-    player.on(Hls.Events.MANIFEST_PARSED, () => {
-      if (sequence !== live_mount_sequence) {
-        return;
-      }
-      set_live_playback_state(
-        "ready",
-        file.status === "paused" ? "已载入已有录制内容" : "已载入已录制内容",
-      );
-      if (autoplay) {
-        video.play().catch(() => {});
-      }
-    });
-    player.on(Hls.Events.ERROR, (_event, data) => {
-      if (sequence !== live_mount_sequence || !data || !data.fatal) {
-        return;
-      }
-      if (data.type === Hls.ErrorTypes.NETWORK_ERROR) {
-        set_live_playback_state("loading", "播放连接中断，正在重试…");
-        player.startLoad();
-        return;
-      }
-      if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-        set_live_playback_state("loading", "媒体解码异常，正在恢复…");
-        player.recoverMediaError();
-        return;
-      }
-      set_live_playback_state("error", "无法播放当前直播编码。");
-      player.destroy();
-      if (live_player === player) {
-        live_player = null;
-      }
-    });
-    player.loadSource(url);
-    player.attachMedia(video);
+    text_reader_file = null;
+    text_loading_.as(false);
   }
 
-  function mount_video(event, file, options) {
-    const video = mounted_media_element(event);
-    if (!video) {
+  function mount_text_reader(event, file) {
+    const target = event_target_element(event);
+    if (!target) {
       return;
     }
-    destroy_live_player(false);
-    if (!should_use_stream_playback(file)) {
-      set_live_playback_state("idle", "");
-      return;
-    }
-    live_video = video;
-    live_file_id = file.id;
-    const sequence = live_mount_sequence;
-    set_live_playback_state("waiting", "正在等待首个直播分片…");
-    probe_live_playlist(sequence, file, options || {});
+    unmount_text_reader();
+    reset_text_reader(file);
+    handle_text_scroll(target);
+    load_text_more(file);
   }
 
-  function unmount_video(file) {
-    if (!file || live_file_id === file.id) {
-      destroy_live_player();
+  function unmount_html_reader() {
+    html_reader_sequence += 1;
+    if (html_reader_abort_controller) {
+      html_reader_abort_controller.abort();
+      html_reader_abort_controller = null;
     }
+    html_reader_file = null;
+    html_content_.as("");
+    html_loading_.as(false);
+    html_error_.as("");
+  }
+
+  async function load_html(file) {
+    if (!file || html_reader_file !== file || html_loading_.value) {
+      return null;
+    }
+    const sequence = ++html_reader_sequence;
+    const abort_controller = new AbortController();
+    html_reader_abort_controller = abort_controller;
+    html_loading_.as(true);
+    html_error_.as("");
+    try {
+      const response = await window.fetch(file_url(file), {
+        headers: {
+          Accept: "text/html, application/xhtml+xml;q=0.9, */*;q=0.1",
+        },
+        signal: abort_controller.signal,
+      });
+      if (!response.ok) {
+        throw new Error(`读取 HTML 失败（HTTP ${response.status}）`);
+      }
+      const content = await response.text();
+      if (sequence !== html_reader_sequence || html_reader_file !== file) {
+        return null;
+      }
+      html_content_.as(html_preview_content(content));
+      return content;
+    } catch (error) {
+      if (error && error.name === "AbortError") {
+        return null;
+      }
+      if (sequence === html_reader_sequence && html_reader_file === file) {
+        html_error_.as(error_message(error, "读取 HTML 失败"));
+      }
+      return null;
+    } finally {
+      if (sequence === html_reader_sequence) {
+        html_loading_.as(false);
+        html_reader_abort_controller = null;
+      }
+    }
+  }
+
+  function mount_html_reader(file) {
+    unmount_html_reader();
+    html_reader_file = file;
+    html_error_.as("");
+    return load_html(file);
   }
 
   const detail_request = new Timeless.kit.RequestCore(
@@ -506,10 +884,12 @@ function PreviewViewModel(props) {
     const task_id = String(
       prop_value(requested_task_id) ||
         prop_value(props.taskId) ||
-        new URLSearchParams(window.location.search).get("id") ||
+        (props.view && props.view.query && props.view.query.id) ||
         "",
     ).trim();
     if (!task_id) {
+      unmount_html_reader();
+      unmount_text_reader();
       loading_.as(false);
       error_.as("Missing task id");
       task_.as(null);
@@ -522,6 +902,8 @@ function PreviewViewModel(props) {
     const task_changed = task_id !== detail_task_id;
     detail_task_id = task_id;
     if (task_changed) {
+      unmount_html_reader();
+      unmount_text_reader();
       destroy_live_player();
       task_.as(null);
       gallery_file_.as(null);
@@ -588,6 +970,8 @@ function PreviewViewModel(props) {
         return;
       }
       destroy_live_player();
+      unmount_html_reader();
+      unmount_text_reader();
       gallery_file_.as(file);
     },
     showFile(file) {
@@ -600,25 +984,32 @@ function PreviewViewModel(props) {
       if (!file_playable(file)) {
         return;
       }
+      unmount_html_reader();
+      unmount_text_reader();
       active_file_.as(file);
       zip_images_.as([], { reset: true });
       zip_error_.as("");
-      window.document.body.style.overflow = "hidden";
+      platform.patchBodyStyle({ overflow: "hidden" });
       if (file.file_type === "zip") {
         load_zip_preview(file);
       }
     },
     closePreview() {
+      unmount_html_reader();
+      unmount_text_reader();
       zip_request_sequence += 1;
       active_file_.as(null);
       zip_loading_.as(false);
       zip_error_.as("");
       zip_images_.as([], { reset: true });
-      window.document.body.style.overflow = "";
+      platform.patchBodyStyle({ overflow: "" });
     },
     destroy() {
+      for (const player of video_players) player.unmount();
       methods.closePreview();
       destroy_live_player();
+      unlisten_hls_player();
+      text_scroll_view$.destroy?.();
       detail_request_sequence += 1;
       if (typeof detail_request.cancel === "function") detail_request.cancel();
       if (typeof live_playback_status_.destroy === "function") {
@@ -635,11 +1026,35 @@ function PreviewViewModel(props) {
     },
     isLivePlayback: is_live_playback,
     filePlayable: file_playable,
-    mountVideo: mount_video,
-    unmountVideo: unmount_video,
+    createVideoPlayer: create_video_player,
     fileTypeIcon: file_type_icon,
     fileTypeLabel: file_type_label,
     formatBytes: format_bytes,
+    isHTMLFile: is_html_file,
+    isTextFile: is_text_file,
+    mountHTMLReader: mount_html_reader,
+    unmountHTMLReader: unmount_html_reader,
+    retryHTML() {
+      if (!html_reader_file) {
+        return null;
+      }
+      html_error_.as("");
+      return load_html(html_reader_file);
+    },
+    textScrollView() {
+      return text_scroll_view$;
+    },
+    mountTextReader: mount_text_reader,
+    unmountTextReader: unmount_text_reader,
+    loadTextMore: load_text_more,
+    retryText() {
+      if (!text_reader_file) {
+        return null;
+      }
+      text_error_.as("");
+      text_has_more_.as(true);
+      return load_text_more(text_reader_file);
+    },
   };
 
   const state = {
@@ -651,6 +1066,15 @@ function PreviewViewModel(props) {
     zip_images: zip_images_,
     zip_loading: zip_loading_,
     zip_error: zip_error_,
+    html_content: html_content_,
+    html_loading: html_loading_,
+    html_error: html_error_,
+    text_lines: text_lines_,
+    text_loading: text_loading_,
+    text_error: text_error_,
+    text_has_more: text_has_more_,
+    text_scroll_top: text_scroll_top_,
+    text_viewport_height: text_viewport_height_,
     live_playback_status: live_playback_status_,
     live_playback_message: live_playback_message_,
   };
@@ -661,7 +1085,12 @@ function PreviewViewModel(props) {
 
 export {
   PreviewViewModel,
+  html_preview_content,
   normalize_file,
+  is_html_file,
+  is_text_file,
   playback_url,
   should_use_stream_playback,
+  subtitle_format,
+  subtitle_to_vtt,
 };

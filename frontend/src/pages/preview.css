@@ -85,28 +85,6 @@
   font-size: var(--dm-font-size-sm);
 }
 
-.preview-platform {
-  display: flex;
-  align-items: center;
-  gap: var(--dm-space-1);
-}
-
-.preview-platform-icon {
-  width: 16px;
-  height: 16px;
-  object-fit: contain;
-}
-
-.preview-badge {
-  display: inline-block;
-  padding: var(--dm-space-0-5) var(--dm-space-1-5);
-  color: var(--dm-preview-muted);
-  font-size: var(--dm-font-size-caption);
-  font-weight: 500;
-  background: var(--dm-preview-border);
-  border-radius: var(--dm-radius-badge);
-}
-
 .preview-video-container,
 .preview-image-container {
   display: flex;
@@ -150,22 +128,18 @@
   background: var(--dm-color-media-canvas);
 }
 
-.preview-live-status {
+.preview-live-status,
+.preview-subtitle-error {
   position: absolute;
   top: var(--dm-space-3);
   left: var(--dm-space-3);
   z-index: 1;
   max-width: calc(100% - var(--dm-space-6));
-  padding: var(--dm-space-1) var(--dm-space-2-5);
   overflow: hidden;
   color: var(--dm-color-media-text);
-  font-size: var(--dm-font-size-sm);
-  line-height: 1.4;
   text-overflow: ellipsis;
-  white-space: nowrap;
   background: var(--dm-color-media-surface);
   border: 1px solid var(--dm-color-media-border);
-  border-radius: var(--dm-radius-badge);
   box-shadow: var(--dm-shadow-sm);
   pointer-events: none;
 }
@@ -179,11 +153,176 @@
   color: var(--dm-color-danger);
 }
 
+.preview-subtitle-error {
+  top: auto;
+  bottom: 64px;
+  color: var(--dm-color-danger);
+}
+
 .preview-image {
   max-width: 100%;
   max-height: calc(100% - 28px);
   object-fit: contain;
   border-radius: var(--dm-radius-content);
+}
+
+.preview-html-reader {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  overflow: hidden;
+  color: #29251d;
+  color-scheme: light;
+  background: var(--dm-color-document-canvas);
+}
+
+.preview-html-content {
+  display: block;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+  padding: var(--dm-space-5);
+  overflow: auto;
+  color: #29251d;
+  line-height: var(--dm-line-height-relaxed);
+  overflow-wrap: anywhere;
+  background: var(--dm-color-document-canvas);
+}
+
+.preview-html-content > :first-child {
+  margin-top: 0;
+}
+
+.preview-html-content > :last-child {
+  margin-bottom: 0;
+}
+
+.preview-html-content img,
+.preview-html-content video,
+.preview-html-content audio,
+.preview-html-content iframe {
+  max-width: 100%;
+}
+
+.preview-html-content img,
+.preview-html-content video {
+  height: auto;
+}
+
+.preview-html-content pre {
+  max-width: 100%;
+  overflow-x: auto;
+  white-space: pre;
+}
+
+.preview-html-content table {
+  max-width: 100%;
+  border-collapse: collapse;
+}
+
+.preview-html-reader > .preview-state {
+  position: absolute;
+  inset: 0;
+  z-index: 1;
+}
+
+.preview-text-reader {
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+  flex: 1;
+  flex-direction: column;
+  overflow: hidden;
+  background: var(--dm-preview-panel);
+}
+
+.preview-text-toolbar {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--dm-space-3);
+  padding: var(--dm-space-2-5) var(--dm-space-4);
+  border-bottom: 1px solid var(--dm-preview-border);
+}
+
+.preview-text-title {
+  min-width: 0;
+  overflow: hidden;
+  font-size: var(--dm-font-size-sm);
+  font-weight: var(--dm-font-weight-semibold);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.preview-text-count,
+.preview-text-status {
+  flex: 0 0 auto;
+  color: var(--dm-preview-muted);
+  font-size: var(--dm-font-size-xs);
+}
+
+.preview-text-lines {
+  min-height: 0;
+  flex: 1;
+  overflow: auto;
+  padding: var(--dm-space-4) var(--dm-space-5);
+  color: var(--dm-preview-text);
+  font-family: var(--dm-font-family-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+  font-size: var(--dm-font-size-sm);
+  line-height: 1.6;
+  background: var(--dm-preview-bg);
+  outline: none;
+}
+
+.preview-text-line {
+  display: grid;
+  grid-template-columns: max-content minmax(0, 1fr);
+  gap: var(--dm-space-4);
+  min-height: 1.6em;
+}
+
+.preview-text-line-number {
+  min-width: 4ch;
+  color: var(--dm-preview-subtle);
+  text-align: right;
+  user-select: none;
+}
+
+.preview-text-line-content {
+  min-width: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.preview-text-status {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--dm-space-2);
+  padding: var(--dm-space-2) var(--dm-space-4);
+  border-top: 1px solid var(--dm-preview-border);
+}
+
+.preview-text-error {
+  color: var(--dm-color-danger);
+}
+
+.preview-text-retry {
+  min-height: var(--dm-control-height-sm);
+  padding: 0 var(--dm-space-3);
+  color: inherit;
+  font: inherit;
+  background: transparent;
+  border: 1px solid currentColor;
+  border-radius: var(--dm-radius-control);
+  cursor: pointer;
+}
+
+.preview-text-retry:hover {
+  background: var(--dm-preview-panel-soft);
 }
 
 .preview-filename {
@@ -283,11 +422,8 @@
   top: 6px;
   right: 6px;
   z-index: 1;
-  padding: var(--dm-space-0-5) var(--dm-space-1-5);
   color: var(--dm-color-media-muted);
-  font-size: var(--dm-font-size-caption);
   background: var(--dm-color-media-surface);
-  border-radius: var(--dm-radius-badge);
 }
 
 .preview-file-info {
@@ -327,6 +463,7 @@
 
 .preview-gallery {
   display: flex;
+  min-width: 0;
   min-height: 0;
   flex: 1;
   flex-direction: column;
@@ -337,7 +474,10 @@
 
 .preview-gallery-stage-list {
   display: flex;
+  width: 100%;
+  min-width: 0;
   min-height: 0;
+  height: 0;
   flex: 1;
 }
 
@@ -347,6 +487,7 @@
 
 .preview-gallery-stage {
   width: 100%;
+  min-width: 0;
   display: flex;
   min-height: 0;
   height: 100%;
@@ -357,14 +498,26 @@
 }
 
 .preview-gallery-viewport {
-  height: auto;
+  height: 100%;
   min-height: 0;
+  min-width: 0;
   flex: 1;
   display: flex;
   align-items: center;
   justify-content: center;
   overflow: hidden;
   background: var(--dm-preview-panel-soft);
+}
+
+.preview-gallery-viewport > .preview-gallery-text-reader,
+.preview-gallery-viewport > .preview-gallery-html-reader,
+.preview-overlay-body > .preview-overlay-text-reader,
+.preview-overlay-body > .preview-overlay-html-reader {
+  align-self: stretch;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
 }
 
 .preview-gallery-stage.is-video .preview-gallery-viewport {

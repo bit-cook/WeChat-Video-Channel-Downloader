@@ -14,6 +14,7 @@ import (
 	"wx_channel/internal/config"
 	"wx_channel/internal/database/model"
 	"wx_channel/internal/events"
+	"wx_channel/pkg/cache"
 	"wx_channel/pkg/cookies"
 	"wx_channel/pkg/scraper/douyin"
 )
@@ -32,12 +33,15 @@ type handler struct {
 	logger     *zerolog.Logger
 	config     *config.Config
 	cookies    *cookies.Reader
+	file_cache *cache.CacheProvider
 }
 
 var (
 	_ adapter.PlatformAdapter          = (*handler)(nil)
 	_ adapter.ProgressFetchAdapter     = (*handler)(nil)
 	_ adapter.FetchDownloadTaskBuilder = (*handler)(nil)
+	_ adapter.HomeContentsBuilder      = (*handler)(nil)
+	_ adapter.HomeDetailsFetcher       = (*handler)(nil)
 	_ adapter.RuntimeAdapter           = (*handler)(nil)
 	_ adapter.RuntimeHandle            = (*handler)(nil)
 )
@@ -56,7 +60,9 @@ func (h *handler) RegisterRuntime(deps *adapter.AdapterOptions) (adapter.Runtime
 	h.logger = deps.Logger
 	h.config = deps.Config
 	h.cookies = deps.Cookies
+	h.file_cache = deps.Cache
 	h.runtime_mu.Unlock()
+	new_routes(h).register_routes(deps.Routes)
 	if deps.Logger != nil {
 		deps.Logger.Info().
 			Str("component", "douyin_adapter").
@@ -81,6 +87,7 @@ func (h *handler) Stop() {
 	h.logger = nil
 	h.config = nil
 	h.cookies = nil
+	h.file_cache = nil
 	h.runtime_mu.Unlock()
 }
 
@@ -114,6 +121,16 @@ func (h *handler) cookie_reader() *cookies.Reader {
 	cookie_reader := h.cookies
 	h.runtime_mu.RUnlock()
 	return cookie_reader
+}
+
+func (h *handler) runtime_file_cache() *cache.CacheProvider {
+	if h == nil {
+		return nil
+	}
+	h.runtime_mu.RLock()
+	file_cache := h.file_cache
+	h.runtime_mu.RUnlock()
+	return file_cache
 }
 
 func (h *handler) Fetch(raw_url string) (any, error) {

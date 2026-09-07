@@ -2,6 +2,7 @@ package api
 
 import (
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"strconv"
@@ -26,6 +27,7 @@ func (c *APIClient) SetupRoutes() {
 	c.engine.POST("/api/scraper/fetch", c.handle_scraper_fetch)
 	// GET remains available for callers migrating from the former synchronous API.
 	c.engine.GET("/api/scraper/fetch", c.handle_scraper_fetch)
+	c.engine.POST("/api/wecom/callback", c.handle_wecom_callback)
 	c.engine.GET("/api/scraper/job", c.handle_scraper_job)
 	c.engine.GET("/api/scraper/platform/status", c.handle_scraper_platform_status)
 	c.engine.POST("/api/scraper/fetch/interrupt", c.handle_scraper_fetch_interrupt)
@@ -64,6 +66,7 @@ func (c *APIClient) SetupRoutes() {
 	c.engine.POST("/api/browse_history/create", c.handle_create_browse_history)
 	c.engine.POST("/api/browse_history/list", c.handle_fetch_browse_history_list)
 	c.engine.POST("/api/v1/download_task/prepare", c.handle_prepare_download_task)
+	c.engine.POST("/api/v1/download_task/update_resource", c.handle_update_download_resource)
 	c.engine.POST("/api/v1/download_task/prepare_by_url", c.handle_prepare_download_task_by_url)
 	c.engine.POST("/api/v1/download_task/create", c.handle_create_download_task)
 	c.engine.POST("/api/v1/download_task/create_by_url", c.handle_create_download_task_by_url)
@@ -98,7 +101,9 @@ func (c *APIClient) SetupRoutes() {
 	// c.engine.POST("/influencers", c.handle_influencer_create)
 	// c.engine.PUT("/influencers/:id", c.handle_influencer_update)
 	c.engine.GET("/api/account/list", c.handle_account_list)
-	// c.engine.POST("/api/account/synchronize", c.handle_account_synchronize)
+	c.engine.GET("/api/account/:scope/content/list", c.handle_account_details_content_list)
+	c.engine.GET("/api/account/details/:scope/content/list", c.handle_account_details_content_list)
+	c.engine.POST("/api/account/synchronize", c.handle_account_synchronize)
 	c.engine.GET("/api/content/list", c.handle_content_list)
 	c.engine.GET("/api/content/detail", c.handle_content_detail)
 	c.engine.GET("/api/content/relations", c.handle_content_relations)
@@ -136,11 +141,17 @@ func (c *APIClient) SetupRoutes() {
 	c.engine.POST("/api/proxy/certificate/uninstall", c.handle_proxy_certificate_uninstall)
 	c.engine.POST("/api/proxy/certificate/uninstall_by_name", c.handle_proxy_certificate_uninstall_by_name)
 	c.engine.POST("/api/cookies/update", c.handle_cookie_update)
+}
 
-	c.engine.NoRoute(func(ctx *gin.Context) {
-		ctx.Header("Content-Type", "text/html; charset=utf-8")
-		ctx.String(http.StatusNotFound, "<!doctype html><html lang=\"zh-CN\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><title>404 Not Found</title><style>body{margin:0;font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Roboto,Helvetica,Arial,sans-serif;background:#0b0c0f;color:#e6e6e6;display:flex;align-items:center;justify-content:center;height:100vh}.box{max-width:560px;padding:24px 28px;border-radius:12px;background:#14171f;box-shadow:0 8px 24px rgba(0,0,0,.3)}h1{margin:0 0 8px;font-size:24px}p{margin:0;color:#b0b0b0}a{color:#8ab4f8;text-decoration:none}a:hover{text-decoration:underline}</style></head><body><div class=\"box\"><h1>404 未找到页面</h1><p>请求的路径不存在。返回 <a href=\"/\">首页</a></p></div></body></html>")
-	})
+func (c *APIClient) handle_wecom_callback(ctx *gin.Context) {
+	body, err := io.ReadAll(ctx.Request.Body)
+	if err != nil {
+		c.logger.Error().Err(err).Msg("failed to read WeCom callback body")
+		ctx.Status(http.StatusInternalServerError)
+		return
+	}
+	fmt.Printf("[WECOM CALLBACK] body: %s\n", body)
+	ctx.String(http.StatusOK, "success")
 }
 
 func (c *APIClient) handle_favicon(ctx *gin.Context) {

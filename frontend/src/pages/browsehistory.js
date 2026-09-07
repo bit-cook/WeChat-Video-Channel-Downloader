@@ -1,5 +1,5 @@
+import { Tag, PlatformTag } from "../dmui.js";
 import { BrowseHistoryViewModel } from "./browsehistory.model.js";
-import { TablePlatformBadge } from "../components.js";
 
 function BrowseHistoryPageView(props) {
   const vm$ = BrowseHistoryViewModel(props);
@@ -64,6 +64,14 @@ function BrowseHistoryPageToolbar(props) {
             "content-filter-fields dm-flex dm-items-center dm-gap-2",
         },
         [
+        PlatformSelect({
+          name: "browse-history-platform-select",
+          store: vm$.ui.select_platform$,
+          attributes: {
+            n: "browse-history-platform-select-trigger",
+            "aria-label": "按平台筛选浏览记录",
+          },
+        }),
         View(
           {
             class: "content-filter-search",
@@ -128,19 +136,13 @@ function BrowseHistoryRowCover(props) {
   const cover_url = browse_history_cover_url(history);
   if (!cover_url) return null;
   return View({ class: "content-row-cover-wrap" }, [
-    View({ class: "content-row-cover content-row-cover-fallback" }, [
-      Timeless.Icon({ name: "file", size: 18 }),
-    ]),
-    Img({
+    LazyImg({
       class: "content-row-cover",
       src: cover_url,
       alt: history.title,
       attributes: {
         loading: "lazy",
         referrerpolicy: "no-referrer",
-      },
-      onError(event) {
-        event.target.style.display = "none";
       },
     }),
   ]);
@@ -201,12 +203,12 @@ function BrowseHistoryRowMain(props) {
             attributes: { n: "browse-history-badges" },
           },
           [
-            TablePlatformBadge({
+            PlatformTag({
               name: "browse-history-platform",
               favicon: vm$.methods.platformFavicon(history),
               label: vm$.methods.platformName(history),
             }),
-            View(
+            Tag(
               {
                 class: "content-row-type",
                 attributes: { n: "browse-history-content-type" },
@@ -236,7 +238,7 @@ function BrowseHistoryRowAccounts(props) {
             Show({
               when: acc.avatar_url,
               ok() {
-                return Img({
+                return LazyImg({
                   class: "content-row-author-avatar",
                   src: acc.avatar_url,
                   attributes: {
@@ -244,9 +246,6 @@ function BrowseHistoryRowAccounts(props) {
                     alt: acc.nickname || acc.external_id || "",
                     loading: "lazy",
                     referrerpolicy: "no-referrer",
-                  },
-                  onError(event) {
-                    event.target.style.display = "none";
                   },
                 });
               },

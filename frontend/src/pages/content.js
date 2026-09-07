@@ -1,6 +1,6 @@
+import { Tag, PlatformTag } from "../dmui.js";
 import { ContentViewModel } from "./content.model.js";
 import ContentDetailPageView from "./content_detail.js";
-import { TablePlatformBadge } from "../components.js";
 
 function ContentDetailDrawer(props) {
   const vm$ = props.store;
@@ -10,10 +10,11 @@ function ContentDetailDrawer(props) {
       class: "dm-drawer--wide",
       attributes: { n: "content-detail-drawer" },
     },
-    [
+    () => [
       ContentDetailPageView({
         app: props.app,
         client: props.client,
+        hlsPlayer: props.hlsPlayer,
         history: props.history,
         embedded: true,
         contentId: vm$.state.detail_id,
@@ -43,6 +44,7 @@ function ContentPageView(props) {
         store: vm$,
         app: props.app,
         client: props.client,
+        hlsPlayer: props.hlsPlayer,
         history: props.history,
       }),
     ],
@@ -89,83 +91,101 @@ function ContentPageToolbar(props) {
     [
       View(
         {
-          class:
-            "content-filter-fields dm-flex dm-items-center dm-gap-2",
+          class: "content-filter-fields dm-flex dm-items-center dm-gap-2",
         },
         [
-        View(
-          {
-            class: "content-filter-search",
-            attributes: { n: "content-search-field" },
-          },
-          [
-            Input({
-              store: vm$.ui.input_keyword$,
-              rootAttributes: { n: "content-search-control" },
-              prefix: Timeless.Icon({
-                name: "search",
-                size: 16,
-                attributes: { n: "content-search-icon" },
-              }),
+          View({}, [
+            PlatformSelect({
+              store: vm$.ui.select_platform$,
+              // class: "content-filter-select",
               attributes: {
-                n: "content-search-input",
-                name: "keyword",
-                type: "search",
-                autocomplete: "off",
-                "aria-label": "搜索内容标题或描述",
+                "aria-label": "按平台筛选内容",
               },
             }),
-          ],
-        ),
-        // Select({
-        //   store: vm$.ui.select_content_type$,
-        //   class: "content-type-select content-filter-select",
-        //   attributes: { "aria-label": "筛选内容类型" },
-        // }),
+          ]),
+          View({}, [
+            AccountSelect({
+              store: vm$.ui.select_account$,
+              platform: vm$.state.platform_id,
+              style: { width: "180px" },
+              attributes: {
+                "aria-label": "按账号筛选内容",
+              },
+            }),
+          ]),
+          View(
+            {
+              // class: "content-filter-search",
+              style: { flex: "1" },
+              attributes: { n: "content-search-field" },
+            },
+            [
+              Input({
+                store: vm$.ui.input_keyword$,
+                rootAttributes: { n: "content-search-control" },
+                prefix: Timeless.Icon({
+                  name: "search",
+                  size: 16,
+                  attributes: { n: "content-search-icon" },
+                }),
+                attributes: {
+                  n: "content-search-input",
+                  name: "keyword",
+                  type: "search",
+                  autocomplete: "off",
+                  "aria-label": "搜索内容标题或描述",
+                },
+              }),
+            ],
+          ),
+          // Select({
+          //   store: vm$.ui.select_content_type$,
+          //   class: "content-type-select content-filter-select",
+          //   attributes: { "aria-label": "筛选内容类型" },
+          // }),
         ],
       ),
       View(
         {
-          class:
-            "content-filter-actions dm-flex dm-items-center dm-gap-2",
+          class: "content-filter-actions dm-flex dm-items-center dm-gap-2",
         },
         [
-        ContentPageActionButton({
-          name: "content-search-action",
-          store: vm$.ui.btn_search$,
-          icon: "search",
-          label: "搜索",
-          variant: "primary",
-          attributes: { type: "submit" },
-          onClick(event) {
-            event.preventDefault();
-            vm$.methods.search();
-          },
-        }),
-        ContentPageActionButton({
-          name: "content-reset-action",
-          store: vm$.ui.btn_refresh$,
-          icon: "rotate-ccw",
-          label: "重置",
-        }),
-        View(
-          {
-            class: "content-scope-toggle",
-            attributes: { n: "content-scope-toggle" },
-          },
-          [
-            Checkbox({
-              store: vm$.ui.checkbox_all$,
-              id: "wxContentScopeAll",
-              text: "所有",
-              textAttributes: { n: "content-scope-all-text" },
-              attributes: {
-                n: "content-scope-all-checkbox",
-                "aria-label": "显示所有内容",
-              },
-            }),
-          ],
-        ),
+          ContentPageActionButton({
+            name: "content-search-action",
+            store: vm$.ui.btn_search$,
+            icon: "search",
+            label: "搜索",
+            variant: "primary",
+            attributes: { type: "submit" },
+            onClick(event) {
+              event.preventDefault();
+              vm$.methods.search();
+            },
+          }),
+          ContentPageActionButton({
+            name: "content-reset-action",
+            store: vm$.ui.btn_refresh$,
+            icon: "rotate-ccw",
+            label: "重置",
+          }),
+          View(
+            {
+              class: "content-scope-toggle",
+              attributes: { n: "content-scope-toggle" },
+            },
+            [
+              Checkbox({
+                store: vm$.ui.checkbox_all$,
+                id: "wxContentScopeAll",
+                text: "所有",
+                textAttributes: { n: "content-scope-all-text" },
+                attributes: {
+                  n: "content-scope-all-checkbox",
+                  "aria-label": "显示所有内容",
+                },
+              }),
+            ],
+          ),
         ],
       ),
     ],
@@ -180,12 +200,7 @@ function ContentRowCover(props) {
   const content = props.content;
   const cover_url = content_cover_url(content);
   if (!cover_url) return null;
-  const fallback = View(
-    { class: "content-row-cover content-row-cover-fallback" },
-    [Timeless.Icon({ name: "file", size: 18 })],
-  );
   return View({ class: "content-row-cover-wrap" }, [
-    fallback,
     LazyImg({
       class: "content-row-cover",
       src: cover_url,
@@ -207,9 +222,7 @@ function ContentRowAccounts(props) {
       each: accounts,
       render(account_) {
         const account =
-          account_ && account_.value !== undefined
-            ? account_.value
-            : account_;
+          account_ && account_.value !== undefined ? account_.value : account_;
         const name =
           account.nickname || account.alias || account.external_id || "未知";
         return View(
@@ -218,23 +231,20 @@ function ContentRowAccounts(props) {
               "content-row-author-account dm-flex dm-items-center dm-gap-1-5 dm-min-w-0",
           },
           [
-          Show({
-            when: account.avatar_url,
-            ok() {
-              return Img({
-                class: "content-row-author-avatar",
-                src: account.avatar_url,
-                alt: name,
-                attributes: {
-                  loading: "lazy",
-                  referrerpolicy: "no-referrer",
-                },
-                onError(event) {
-                  event.target.style.display = "none";
-                },
-              });
-            },
-          }),
+            Show({
+              when: account.avatar_url,
+              ok() {
+                return LazyImg({
+                  class: "content-row-author-avatar",
+                  src: account.avatar_url,
+                  alt: name,
+                  attributes: {
+                    loading: "lazy",
+                    referrerpolicy: "no-referrer",
+                  },
+                });
+              },
+            }),
             View(
               {
                 class: "content-row-author-name",
@@ -252,17 +262,16 @@ function ContentRowAccounts(props) {
 function ContentRowStatistics(props) {
   const statistics = props.statistics;
   const items = [
-    { key: "in-progress", label: "进行中任务", value: statistics.in_progress },
-    { key: "failed", label: "失败任务", value: statistics.failed },
-    { key: "success", label: "成功任务", value: statistics.total_tasks },
+    ...statistics.task_statuses,
     { key: "files", label: "文件", value: statistics.files },
   ].filter((item) => item.value > 0);
   return [
     For({
       each: items,
       render(item) {
-        return View(
+        return Tag(
           {
+            name: "content-row-stat",
             class: `content-row-stat content-row-stat-${item.key}`,
             attributes: { title: `${item.label}：${item.value}` },
           },
@@ -359,33 +368,32 @@ function ContentRowMain(props) {
       ),
       View(
         {
-          class:
-            "content-row-badges dm-flex dm-items-center dm-gap-1-5",
+          class: "content-row-badges dm-flex dm-items-center dm-gap-1-5",
         },
         [
-        TablePlatformBadge({
-          name: "content-platform",
-          favicon,
-          label: vm$.methods.platformName(content),
-        }),
-        View({ class: "content-row-type" }, [
-          vm$.methods.typeLabel(content.content_type),
-        ]),
-        Show({
-          when: content.content_subtype,
-          ok() {
-            return View(
-              {
-                class: "content-row-type content-row-subtype",
-                attributes: {
-                  n: "content-subtype",
-                  title: `subtype: ${content.content_subtype}`,
+          PlatformTag({
+            name: "content-platform",
+            favicon,
+            label: vm$.methods.platformName(content),
+          }),
+          Tag({ name: "content-row-type", class: "content-row-type" }, [
+            vm$.methods.typeLabel(content.content_type),
+          ]),
+          Show({
+            when: content.content_subtype,
+            ok() {
+              return Tag(
+                {
+                  class: "content-row-type content-row-subtype",
+                  attributes: {
+                    n: "content-subtype",
+                    title: `subtype: ${content.content_subtype}`,
+                  },
                 },
-              },
-              [content.content_subtype],
-            );
-          },
-        }),
+                [content.content_subtype],
+              );
+            },
+          }),
         ],
       ),
     ]),
@@ -507,19 +515,14 @@ function ContentPageBody(props) {
           "content-row-meta dm-flex dm-items-center dm-gap-1-5 dm-text-muted dm-text-sm dm-tabular-nums dm-whitespace-nowrap",
         render(content) {
           return [
-            View(
-              { attributes: { n: "content-time" } },
-              [
-                View(
-                  { attributes: { n: "content-publish-time" } },
-                  [`发布时间: ${vm$.methods.formatTime(content.publish_time)}`],
-                ),
-                View(
-                  { attributes: { n: "content-created-at" } },
-                  [`创建时间: ${vm$.methods.formatTime(content.created_at)}`],
-                ),
-              ],
-            ),
+            View({ attributes: { n: "content-time" } }, [
+              View({ attributes: { n: "content-publish-time" } }, [
+                `发布时间: ${vm$.methods.formatTime(content.publish_time)}`,
+              ]),
+              View({ attributes: { n: "content-created-at" } }, [
+                `创建时间: ${vm$.methods.formatTime(content.created_at)}`,
+              ]),
+            ]),
           ];
         },
       },
@@ -542,7 +545,7 @@ function ContentPageBody(props) {
       page: vm$.state.page,
       pageCount: vm$.state.page_count,
       pageSize: vm$.state.page_size,
-      loading: vm$.state.loading,
+      loading: vm$.state.initial,
       onChange(page) {
         return vm$.methods.changePage(page);
       },

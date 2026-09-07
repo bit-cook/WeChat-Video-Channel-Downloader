@@ -79,6 +79,19 @@ type FetchDownloadTaskBuilder interface {
 	BuildDownloadTaskFromFetch(data any, config_json json.RawMessage) (*DownloadTaskResult, error)
 }
 
+// HomeContentsBuilder declares platform-specific account tabs and fetches only
+// the tab explicitly selected by the caller.
+type HomeContentsBuilder interface {
+	HomeContentTabs(account *model.Account) []HomeContentTab
+	BuildHomeContents(account *model.Account, scope string) (*HomeContents, error)
+}
+
+// HomeDetailsFetcher fetches one page from a platform account's home without
+// persisting the returned platform-native content records.
+type HomeDetailsFetcher interface {
+	FetchHomeDetails(account *model.Account, scope string, page string) (*HomeDetails, error)
+}
+
 // FetchOptions controls a context-aware scraper fetch.
 type FetchOptions struct {
 	RequestID       string

@@ -1,3 +1,5 @@
+import { PreviewViewModel, normalize_file } from "./preview.model.js";
+
 function first_non_empty(...values) {
   for (const value of values) {
     if (value !== undefined && value !== null && value !== "") {
@@ -196,12 +198,8 @@ function normalize_content_detail(raw) {
   };
 }
 
-function detail_id_from_location() {
-  try {
-    return new URLSearchParams(window.location.search).get("id") || "";
-  } catch {
-    return "";
-  }
+function detail_id_from_query(query) {
+  return String((query && query.id) || "");
 }
 
 function prop_value(value) {
@@ -473,9 +471,55 @@ function content_media_assets(assets) {
   });
 }
 
+function sort_content_media_entries(entries, content) {
+  if (!["album", "image_set"].includes(content.content_type)) return entries;
+  // Follow the API's ordered resource list after gathering linked and legacy assets.
+  const resource_order = new Map(
+    content.resources.map((resource, index) => [String(resource.id ?? resource.ID), index]),
+  );
+  const order = (entry) => resource_order.get(
+    String(entry.resource.id ?? entry.resource.ID),
+  ) ?? Infinity;
+  return [...entries].sort((left, right) => order(left) - order(right));
+}
+
+function ContentDetailDescriptionModel() {
+  const expanded_ = ref(false);
+  const overflowing_ = ref(false);
+  let observer;
+
+  return {
+    state: { expanded: expanded_, overflowing: overflowing_ },
+    methods: {
+      mount(element) {
+        observer?.disconnect();
+        expanded_.as(false);
+        const measure = () => {
+          if (!expanded_.value) {
+            overflowing_.as(element.scrollHeight > element.clientHeight);
+          }
+        };
+        observer = new ResizeObserver(measure);
+        observer.observe(element);
+        measure();
+      },
+      toggle() {
+        expanded_.as(!expanded_.value);
+      },
+      destroy() {
+        observer?.disconnect();
+      },
+    },
+  };
+}
+
 function ContentDetailViewModel(props) {
+  const preview$ = PreviewViewModel(props);
   const detail_id_ = ref(
-    String(prop_value(props.contentId) || detail_id_from_location()).trim(),
+    String(
+      prop_value(props.contentId) ||
+        detail_id_from_query(props.view && props.view.query),
+    ).trim(),
   );
   const detail_ = ref(null);
   const loading_ = ref(false);
@@ -591,8 +635,9 @@ function ContentDetailViewModel(props) {
     return result;
   }
 
+  let unsubscribe_content_id;
   if (props.contentId && typeof props.contentId.subscribe === "function") {
-    props.contentId.subscribe({
+    unsubscribe_content_id = props.contentId.subscribe({
       onChange(content_id) {
         const id = String(content_id || "").trim();
         if (!id || id === detail_id_.value) return;
@@ -602,6 +647,22 @@ function ContentDetailViewModel(props) {
   }
 
   const methods = {
+    previewFile(media) {
+      return normalize_file({
+        ...media.resource,
+        name: media.name,
+        file_type: media.type,
+        file_url: media.url,
+        exists: media.available,
+      });
+    },
+    destroy() {
+      request_sequence += 1;
+      unsubscribe_content_id?.();
+      preview$.methods.destroy();
+      request_.cancel?.();
+      check_files_request_.cancel?.();
+    },
     ready() {
       return load(prop_value(props.contentId) || detail_id_.value);
     },
@@ -613,7 +674,7 @@ function ContentDetailViewModel(props) {
         props.onBack();
         return;
       }
-      window.location.assign("/content");
+      props.history.push("root.shell.content");
     },
     openDetail(content_id) {
       return load(content_id);
@@ -621,14 +682,14 @@ function ContentDetailViewModel(props) {
     openSource(content) {
       const url = content_source_url(content);
       if (url) {
-        window.open(url, "_blank", "noopener,noreferrer");
+        props.app.openWindow(url);
       }
     },
     openResource(resource) {
       if (!resource_file_available(resource)) return;
       const url = resource_file_url(resource);
       if (url) {
-        window.open(url, "_blank", "noopener,noreferrer");
+        props.app.openWindow(url);
       }
     },
     showResource(resource) {
@@ -653,6 +714,7 @@ function ContentDetailViewModel(props) {
     formatTime: window.format_time,
     formatBytes: format_bytes,
     contentMediaAssets: content_media_assets,
+    sortMediaEntries: sort_content_media_entries,
   };
 
   const state = {
@@ -661,9 +723,9 @@ function ContentDetailViewModel(props) {
     loading: loading_,
     error: error_,
   };
-  const ui = {};
+  const ui = { preview$ };
 
   return { state, ui, methods };
 }
 
-export { ContentDetailViewModel };
+export { ContentDetailViewModel, ContentDetailDescriptionModel, task_status, sort_content_media_entries };
